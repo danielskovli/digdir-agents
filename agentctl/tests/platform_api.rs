@@ -99,9 +99,7 @@ async fn session_reports_require_the_current_launch_token() {
         .await
         .expect("record launch");
 
-    let listener = agent::platform_api::bind_persistent(&directory.path().join("platform-api-port"))
-        .await
-        .expect("bind Platform API listener");
+    let listener = agent::platform_api::bind().await.expect("bind Platform API listener");
     let port = listener.local_addr().expect("local address").port();
     let reported_errors = Rc::new(std::cell::Cell::new(0));
     let error_count = reported_errors.clone();
@@ -280,9 +278,7 @@ async fn platform_api_bounds_stalled_connections() {
     const TOKEN: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
     let directory = TempDir::new().expect("temporary directory");
     let database = persistence::Database::open(&directory.path().join("agent.db")).expect("database");
-    let listener = agent::platform_api::bind_persistent(&directory.path().join("platform-api-port"))
-        .await
-        .expect("bind Platform API listener");
+    let listener = agent::platform_api::bind().await.expect("bind Platform API listener");
     let port = listener.local_addr().expect("local address").port();
     let server = Rc::new(agent::platform_api::Server::new(
         Rc::new(database),

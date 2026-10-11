@@ -221,7 +221,7 @@ async fn run_lifecycle_execution(
 /// Session's recorded model selection is part of every launch, resumed or not.
 fn launch_arguments(
     session: &Session,
-    session_hook_url: &str,
+    platform_api_url: &str,
     token: &LaunchToken,
     resume: Option<&str>,
     initial_message: Option<&str>,
@@ -241,7 +241,15 @@ fn launch_arguments(
         ("CONTAINER_HOST".into(), crate::sandbox::platform::CONTAINER_HOST.into()),
         ("AGENT_SESSION_ID".into(), session.id.to_string()),
         ("AGENT_SESSION_TOKEN".into(), token.expose()),
-        ("AGENT_SESSION_HOOK_URL".into(), session_hook_url.into()),
+        // TODO: Remove in the release after the first one with `PLATFORM_API_URL_FILE`, with
+        // agentd's removal of `platform-api-port`. Hook scripts installed by earlier releases
+        // read the endpoint only from here, and a relaunch after an upgrade can run before
+        // setup replaces them; current hook scripts read `PLATFORM_API_URL_FILE` instead. An
+        // upgrade that skips that release loses such a relaunch's reports until setup completes.
+        (
+            "AGENT_SESSION_HOOK_URL".into(),
+            format!("{platform_api_url}{}", crate::platform_api::SESSION_HOOKS_PATH),
+        ),
     ]);
     for (name, value) in session_environment {
         arguments.push("-e".into());
@@ -255,12 +263,12 @@ fn launch_arguments(
 async fn launch(
     session: &Session,
     sandbox: &SandboxHandle,
-    session_hook_url: &str,
+    platform_api_url: &str,
     token: &LaunchToken,
     resume: Option<&str>,
     initial_message: Option<&str>,
 ) -> Result<(), Error> {
-    let arguments = launch_arguments(session, session_hook_url, token, resume, initial_message);
+    let arguments = launch_arguments(session, platform_api_url, token, resume, initial_message);
     let created = run_lifecycle_execution(
         sandbox,
         ExecutionSpec::command(SandboxPath::new("/usr/bin/tmux"), arguments)
@@ -361,7 +369,7 @@ impl super::SessionRuntime for Tmux {
         &'a self,
         session: &'a Session,
         sandbox: &'a SandboxHandle,
-        session_hook_url: &'a str,
+        platform_api_url: &'a str,
         token: &'a LaunchToken,
         resume: Option<&'a str>,
         initial_prompt: Option<&'a str>,
@@ -369,7 +377,7 @@ impl super::SessionRuntime for Tmux {
         Box::pin(launch(
             session,
             sandbox,
-            session_hook_url,
+            platform_api_url,
             token,
             resume,
             initial_prompt,
