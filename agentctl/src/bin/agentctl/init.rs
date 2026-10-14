@@ -147,6 +147,7 @@ fn template(name: &str, status: &AuthenticationStatus) -> String {
     } else {
         "  # Run `agentctl github login` and uncomment to act as a GitHub account.\n  # accounts:\n  #   - type: github\n"
     };
+    let code = agent::sandbox::platform::WORKING_DIRECTORY;
     format!(
         "# Created by `agentctl init`. Change it and run `agentctl apply` to update the Agent.
 apiVersion: agents.platform/v1alpha1
@@ -167,12 +168,12 @@ spec:
         capacity: \"64Gi\"
         mode: layered
     initSystem: image
-    # The image clones its own repositories into /home/agent/code. To work on this checkout
+    # The image clones its own repositories into {code}. To work on this checkout
     # instead, uncomment the mount; mounts cannot change once the Agent exists.
     # mounts:
     #   - type: bind
     #     source: .
-    #     target: /home/agent/code/{name}
+    #     target: {code}/{name}
     #     readOnly: false
   harnesses:
 {harnesses}{accounts}  access:
@@ -268,7 +269,7 @@ mod tests {
         assert!(matches!(
             agent.spec.sandbox.mounts.as_slice(),
             [agent::MountSpec::Bind { source, target, read_only: false }]
-                if source == Path::new(".") && target.as_str() == "/home/agent/code/worker"
+                if source == Path::new(".") && target.as_str() == format!("{}/worker", agent::sandbox::platform::WORKING_DIRECTORY)
         ));
     }
 
