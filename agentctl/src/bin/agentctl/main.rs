@@ -20,6 +20,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 mod format;
 mod launch;
 mod progress;
+mod prompt;
 mod self_update;
 mod tui;
 
@@ -55,6 +56,11 @@ enum Command {
     Codex {
         #[command(subcommand)]
         command: CodexCommand,
+    },
+    /// Manage the GitHub account Agents act as.
+    Github {
+        #[command(subcommand)]
+        command: GithubCommand,
     },
     /// Create a Session and wait until its harness is ready, without attaching.
     Create {
@@ -457,6 +463,22 @@ enum CodexCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum GithubCommand {
+    /// Store a GitHub token for Agents, separate from any `gh` login on this host.
+    ///
+    /// Agents whose manifest lists `accounts: [{type: github}]` act as this account: they see an
+    /// inert `GITHUB_TOKEN` that only requests to GitHub receive, and commit as the account.
+    Login {
+        /// Read the token from standard input instead of asking for it.
+        #[arg(long, conflicts_with = "from_gh")]
+        from_stdin: bool,
+        /// Use the token of the host's active `gh` login, which is often your own account.
+        #[arg(long)]
+        from_gh: bool,
+    },
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
@@ -522,6 +544,22 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
                 .auth_login(agent::Harness::Codex, credential.to_string(), from_stdin)
                 .await?;
             println!("{} authentication stored", imported.provider);
+        }
+        Command::Github {
+            command: GithubCommand::Login { from_stdin, from_gh },
+        } => {
+            let token = if from_stdin {
+                read_token_from_stdin()?
+            } else if from_gh {
+                agent::github::token_from_gh()?
+            } else {
+                ask_for_github_token()?
+            };
+            let account = client.github_login(token.to_string()).await?;
+            println!(
+                "Agents with the GitHub account now act as {} and commit as {} <{}>",
+                account.login, account.name, account.email
+            );
         }
         Command::Apply {
             filename,
@@ -1658,6 +1696,17 @@ fn read_apply_request_in(
         create_only: false,
         agent,
     })
+}
+
+fn ask_for_github_token() -> Result<zeroize::Zeroizing<String>, Error> {
+    if !prompt::interactive() {
+        return Err(Error::Invalid(
+            "no terminal to ask for a GitHub token on; pass it with `--from-stdin`".into(),
+        ));
+    }
+    eprintln!("Agents use this token instead of your `gh` login, so it can belong to a separate account.");
+    eprintln!("Create one at https://github.com/settings/tokens while signed in as that account.");
+    prompt::secret("GitHub token")
 }
 
 fn read_token_from_stdin() -> Result<zeroize::Zeroizing<String>, Error> {

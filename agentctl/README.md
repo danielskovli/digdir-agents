@@ -209,6 +209,18 @@ than bind-mounting it, so package managers can still replace the bundle, and it 
 anchor so a regenerated bundle keeps trusting mediation. Docker and dockerd are not covered by this convenience
 wiring.
 
+## GitHub account
+
+`agentctl github login` stores one GitHub token for Agents, separate from any `gh` login on the host, so Agents can
+act as their own account, such as a bot, while you keep using yours. It asks for the token, or reads it with
+`--from-stdin`; `--from-gh` takes the active `gh` login instead. GitHub is asked which account the token belongs to,
+and that account's name and email, or its noreply address, become the Agents' Git identity.
+
+An Agent opts in with `spec.accounts: [{type: github}]`. Its Sandbox then sees an inert `GITHUB_TOKEN`, which the
+network mediator replaces only in requests to `github.com`, `api.github.com`, `gist.github.com` and
+`uploads.github.com`; a manifest cannot widen that list. The account's identity applies unless the manifest selects
+`GIT_USER_NAME` and `GIT_USER_EMAIL` itself. A manifest with the account cannot also bind its own `GITHUB_TOKEN`.
+
 SQLite `secure_delete` and owner-only filesystem permissions provide local hygiene. They are not a cryptographic
 erasure guarantee across WAL history, filesystem snapshots or backups.
 

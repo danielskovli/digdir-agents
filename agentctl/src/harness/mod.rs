@@ -248,11 +248,12 @@ pub struct ImportedAuthentication {
     pub ready: bool,
 }
 
-/// Dispatches host-side authentication to the selected harness adapter.
+/// Dispatches host-side authentication to the selected harness adapter or the GitHub account.
 pub struct AuthenticationManager {
     database: persistence::Database,
     claude_code: claude_code::authentication::Authentication,
     codex: codex::authentication::Authentication,
+    github: crate::github::Authentication,
 }
 
 impl AuthenticationManager {
@@ -262,8 +263,18 @@ impl AuthenticationManager {
         Self {
             database: database.clone(),
             claude_code: claude_code::authentication::Authentication::new(database.clone()),
-            codex: codex::authentication::Authentication::new(database),
+            codex: codex::authentication::Authentication::new(database.clone()),
+            github: crate::github::Authentication::new(database),
         }
+    }
+
+    /// Stores the GitHub token Agents with the GitHub account use, returning its account.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when GitHub rejects the token or cannot be reached, or it cannot be persisted.
+    pub async fn github_login(&self, token: Zeroizing<String>) -> Result<crate::github::GithubAccount, Error> {
+        self.github.login(token).await
     }
 
     /// Stores a credential for the selected harness.

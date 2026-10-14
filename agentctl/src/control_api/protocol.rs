@@ -21,6 +21,7 @@ pub(crate) const METHOD_CONVERGE: &str = "agents.v1.converge";
 pub(crate) const METHOD_SSH_ACCESS: &str = "agents.v1.sshAccess";
 pub(crate) const METHOD_VNC_ACCESS: &str = "agents.v1.vncAccess";
 pub(crate) const METHOD_AUTH_LOGIN: &str = "authentication.v1.login";
+pub(crate) const METHOD_GITHUB_LOGIN: &str = "authentication.v1.githubLogin";
 pub(crate) const METHOD_SESSION_ENSURE: &str = "sessions.v1.ensure";
 pub(crate) const METHOD_SESSION_GET: &str = "sessions.v1.get";
 pub(crate) const METHOD_SESSION_LIST: &str = "sessions.v1.list";
@@ -194,6 +195,12 @@ pub(crate) struct LoginParams {
     /// The credential was supplied by the caller rather than minted by the host login flow.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub imported: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GithubLoginParams {
+    pub token: String,
 }
 
 /// Identity returned by the frozen lifecycle health method.

@@ -556,3 +556,43 @@ fn rejects_unknown_duplicate_and_configured_access_capabilities() {
     )]);
     assert!(matches!(manifest::decode(&nested), Err(agent::Error::Yaml(_))));
 }
+
+#[test]
+fn the_github_account_is_opt_in_and_owns_github_token() {
+    let agent = manifest::decode(&manifest_with_access("  accounts:\n    - type: github\n")).expect("github account");
+    assert!(agent.spec.github_account());
+    let encoded = serde_yaml_ng::to_string(&agent).expect("encode");
+    assert!(encoded.contains("accounts:\n  - type: github"), "{encoded}");
+    let without = manifest::decode(&manifest_with(&[])).expect("no accounts");
+    assert!(!without.spec.github_account());
+
+    assert!(matches!(
+        manifest::decode(&manifest_with_access("  accounts:\n    - type: github\n    - type: github\n")),
+        Err(agent::Error::Invalid(message)) if message.contains("spec.accounts[1]")
+    ));
+    assert!(
+        matches!(
+            manifest::decode(&manifest_with_access(
+                "  accounts:\n    - type: github\n      user: bot\n"
+            )),
+            Err(agent::Error::Yaml(_))
+        ),
+        "the GitHub account exposes no tunables"
+    );
+
+    let own_secret = "  secrets:\n    - environment: GITHUB_TOKEN\n      allowedHosts: [github.com]\n";
+    manifest::decode(&manifest_with_access(own_secret)).expect("a manifest may still bind its own GitHub token");
+    assert!(matches!(
+        manifest::decode(&manifest_with_access(&format!("  accounts:\n    - type: github\n{own_secret}"))),
+        Err(agent::Error::Invalid(message)) if message.contains("spec.secrets[0]")
+    ));
+    let own_placeholder = "  secrets:\n    - environment: GH_TOKEN\n      placeholder: github_pat_AGENT_MEDIATED_GITHUB_TOKEN\n      allowedHosts: [github.com]\n";
+    assert!(matches!(
+        manifest::decode(&manifest_with_access(&format!("  accounts:\n    - type: github\n{own_placeholder}"))),
+        Err(agent::Error::Invalid(message)) if message.contains("spec.secrets[0]")
+    ));
+    assert!(matches!(
+        manifest::decode(&manifest_with_access("  accounts:\n    - type: github\n  environment:\n    - name: GITHUB_TOKEN\n")),
+        Err(agent::Error::Invalid(message)) if message.contains("spec.environment[0]")
+    ));
+}

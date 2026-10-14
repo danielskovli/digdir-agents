@@ -13,9 +13,9 @@ use crate::{
 
 use super::protocol::{
     CODE_IMMUTABLE, CODE_INTERNAL, CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_METHOD_NOT_FOUND, CODE_NOT_FOUND,
-    CODE_PARSE_ERROR, CODE_UPDATING, DirectoryParams, ExecutionEnsureParams, JSON_RPC_VERSION, LoginParams,
-    METHOD_APPLY, METHOD_AUTH_LOGIN, METHOD_CONVERGE, METHOD_DELETE, METHOD_EXECUTION_ENSURE, METHOD_GET,
-    METHOD_HEALTH, METHOD_LIST, METHOD_PROGRESS, METHOD_RESOLVE_DIRECTORY, METHOD_RESOURCES_WATCH,
+    CODE_PARSE_ERROR, CODE_UPDATING, DirectoryParams, ExecutionEnsureParams, GithubLoginParams, JSON_RPC_VERSION,
+    LoginParams, METHOD_APPLY, METHOD_AUTH_LOGIN, METHOD_CONVERGE, METHOD_DELETE, METHOD_EXECUTION_ENSURE, METHOD_GET,
+    METHOD_GITHUB_LOGIN, METHOD_HEALTH, METHOD_LIST, METHOD_PROGRESS, METHOD_RESOLVE_DIRECTORY, METHOD_RESOURCES_WATCH,
     METHOD_SESSION_ARCHIVE, METHOD_SESSION_DELETE, METHOD_SESSION_ENSURE, METHOD_SESSION_GET, METHOD_SESSION_LIST,
     METHOD_SESSION_PROMPT, METHOD_SESSION_TURNS, METHOD_SESSION_UNARCHIVE, METHOD_SHUTDOWN, METHOD_SSH_ACCESS,
     METHOD_START, METHOD_STOP, METHOD_VNC_ACCESS, NameParams, PROTOCOL_VERSION, ProgressParams, ReadMessage, Request,
@@ -114,6 +114,9 @@ pub trait AuthenticationApi {
         credential: &'a str,
         imported: bool,
     ) -> LocalFuture<'a, Result<harness::ImportedAuthentication, Error>>;
+
+    /// Stores the GitHub token Agents with the GitHub account use, returning its account.
+    fn github_login<'a>(&'a self, token: &'a str) -> LocalFuture<'a, Result<crate::github::GithubAccount, Error>>;
 }
 
 impl AuthenticationApi for harness::AuthenticationManager {
@@ -127,6 +130,10 @@ impl AuthenticationApi for harness::AuthenticationManager {
             self.login(harness, zeroize::Zeroizing::new(credential.to_owned()), imported)
                 .await
         })
+    }
+
+    fn github_login<'a>(&'a self, token: &'a str) -> LocalFuture<'a, Result<crate::github::GithubAccount, Error>> {
+        Box::pin(async move { self.github_login(zeroize::Zeroizing::new(token.to_owned())).await })
     }
 }
 
@@ -543,6 +550,7 @@ impl Server {
             METHOD_SSH_ACCESS => self.handle_ssh_access(request.id, request.params).await,
             METHOD_VNC_ACCESS => self.handle_vnc_access(request.id, request.params).await,
             METHOD_AUTH_LOGIN => self.handle_auth_login(request.id, request.params).await,
+            METHOD_GITHUB_LOGIN => self.handle_github_login(request.id, request.params).await,
             METHOD_SESSION_ENSURE => self.handle_session_ensure(request.id, request.params).await,
             METHOD_SESSION_GET => self.handle_session_get(request.id, request.params).await,
             METHOD_SESSION_LIST => self.handle_session_list(request.id, request.params).await,
@@ -756,6 +764,13 @@ impl Server {
         )
     }
 
+    async fn handle_github_login(&self, id: u64, value: Value) -> Response {
+        let Ok(params) = serde_json::from_value::<GithubLoginParams>(value) else {
+            return error_response(id, CODE_INVALID_PARAMS, "token is required");
+        };
+        result_response(id, self.authentication.github_login(&params.token).await)
+    }
+
     async fn handle_session_ensure(&self, id: u64, value: Value) -> Response {
         let params = match serde_json::from_value::<SessionEnsureParams>(value) {
             Ok(params) => params,
@@ -883,6 +898,7 @@ fn is_mutating(method: &str) -> bool {
             | METHOD_START
             | METHOD_EXECUTION_ENSURE
             | METHOD_AUTH_LOGIN
+            | METHOD_GITHUB_LOGIN
             | METHOD_SESSION_ENSURE
             | METHOD_SESSION_PROMPT
             | METHOD_SESSION_DELETE

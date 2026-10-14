@@ -129,6 +129,16 @@ fn answered_turn(prompt: &str, answer: &str) -> agent::sessions::Turn {
 }
 
 impl AuthenticationApi for FakeAuthentication {
+    fn github_login<'a>(&'a self, token: &'a str) -> LocalFuture<'a, Result<agent::github::GithubAccount, Error>> {
+        Box::pin(async move {
+            Ok(agent::github::GithubAccount {
+                login: token.trim_start_matches("ghp_").into(),
+                name: "Bot".into(),
+                email: "bot@example.com".into(),
+            })
+        })
+    }
+
     fn login<'a>(
         &'a self,
         _harness: agent::Harness,

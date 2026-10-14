@@ -12,6 +12,10 @@ Agents. The Rust workspace version is a build detail and is not tracked here.
 
 ## [Unreleased]
 
+### Added
+
+- `agentctl github login` stores a GitHub account for Agents, separate from your own `gh` login, and Agents whose manifest lists `accounts: [{type: github}]` use it for GitHub and commit as that account, with no `.env` file. ([GitHub account](https://github.com/digdir/digdir-agents/tree/main/agentctl#github-account))
+
 ### Changed
 
 - An Agent manifest no longer needs `home` or `network`: without `home` nothing is copied into `/home/agent`, and without `network` all traffic goes through the host's network mediator, as before.
