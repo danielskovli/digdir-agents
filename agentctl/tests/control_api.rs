@@ -129,6 +129,16 @@ fn answered_turn(prompt: &str, answer: &str) -> agent::sessions::Turn {
 }
 
 impl AuthenticationApi for FakeAuthentication {
+    fn status(&self) -> LocalFuture<'_, Result<agent::harness::AuthenticationStatus, Error>> {
+        Box::pin(async {
+            Ok(agent::harness::AuthenticationStatus {
+                claude_code: true,
+                codex: false,
+                github: None,
+            })
+        })
+    }
+
     fn github_login<'a>(&'a self, token: &'a str) -> LocalFuture<'a, Result<agent::github::GithubAccount, Error>> {
         Box::pin(async move {
             Ok(agent::github::GithubAccount {
@@ -1161,4 +1171,23 @@ async fn unix_socket_transport_is_private_and_usable() {
         .expect("server should stop")
         .expect("server task")
         .expect("server result");
+}
+
+#[tokio::test(flavor = "local")]
+async fn the_github_login_and_authentication_status_round_trip() {
+    let fixture = api();
+
+    let account = fixture
+        .client
+        .github_login("ghp_digdir-bot".into())
+        .await
+        .expect("GitHub login");
+    assert_eq!(account.login, "digdir-bot");
+    assert_eq!(account.email, "bot@example.com");
+
+    let status = fixture.client.auth_status().await.expect("status");
+    assert!(status.claude_code);
+    assert!(!status.codex);
+    assert!(status.any_harness());
+    assert_eq!(status.github, None);
 }

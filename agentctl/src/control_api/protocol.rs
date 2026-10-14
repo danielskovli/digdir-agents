@@ -22,6 +22,7 @@ pub(crate) const METHOD_SSH_ACCESS: &str = "agents.v1.sshAccess";
 pub(crate) const METHOD_VNC_ACCESS: &str = "agents.v1.vncAccess";
 pub(crate) const METHOD_AUTH_LOGIN: &str = "authentication.v1.login";
 pub(crate) const METHOD_GITHUB_LOGIN: &str = "authentication.v1.githubLogin";
+pub(crate) const METHOD_AUTH_STATUS: &str = "authentication.v1.status";
 pub(crate) const METHOD_SESSION_ENSURE: &str = "sessions.v1.ensure";
 pub(crate) const METHOD_SESSION_GET: &str = "sessions.v1.get";
 pub(crate) const METHOD_SESSION_LIST: &str = "sessions.v1.list";

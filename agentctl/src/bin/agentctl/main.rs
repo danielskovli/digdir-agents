@@ -18,6 +18,7 @@ use agent::{
 use clap::{Parser, Subcommand, ValueEnum};
 
 mod format;
+mod init;
 mod launch;
 mod progress;
 mod prompt;
@@ -310,6 +311,8 @@ enum Command {
         #[arg(short = 'o', long, default_value = "table", value_enum)]
         output: OutputFormat,
     },
+    /// Set up an Agent for the current directory, signing in and writing a manifest as needed.
+    Init,
     /// Open the interactive terminal UI.
     Tui,
     /// Wait for a resource condition.
@@ -521,45 +524,21 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
         Command::Self_ { command } => self_update::execute(command, home).await?,
         Command::Claude {
             command: ClaudeCommand::Login { from_stdin },
-        } => {
-            let token = if from_stdin {
-                read_token_from_stdin()?
-            } else {
-                agent::harness::acquire_host_credential(agent::Harness::ClaudeCode, home.path())?
-            };
-            let imported = client
-                .auth_login(agent::Harness::ClaudeCode, token.to_string(), from_stdin)
-                .await?;
-            println!("{} authentication stored", imported.provider);
-        }
+        } => harness_login(home, client, agent::Harness::ClaudeCode, from_stdin).await?,
         Command::Codex {
             command: CodexCommand::Login { from_stdin },
-        } => {
-            let credential = if from_stdin {
-                read_stdin_to_end()?
-            } else {
-                agent::harness::acquire_host_credential(agent::Harness::Codex, home.path())?
-            };
-            let imported = client
-                .auth_login(agent::Harness::Codex, credential.to_string(), from_stdin)
-                .await?;
-            println!("{} authentication stored", imported.provider);
-        }
+        } => harness_login(home, client, agent::Harness::Codex, from_stdin).await?,
         Command::Github {
             command: GithubCommand::Login { from_stdin, from_gh },
         } => {
-            let token = if from_stdin {
-                read_token_from_stdin()?
-            } else if from_gh {
-                agent::github::token_from_gh()?
-            } else {
-                ask_for_github_token()?
-            };
-            let account = client.github_login(token.to_string()).await?;
-            println!(
-                "Agents with the GitHub account now act as {} and commit as {} <{}>",
-                account.login, account.name, account.email
-            );
+            github_login(client, from_stdin, from_gh).await?;
+        }
+        Command::Init => {
+            if let Some(name) = init::run(home, client).await?
+                && prompt::confirm(&format!("Open a Session on {name} now?"))?
+            {
+                attach_new_session(home, client, &name).await?;
+            }
         }
         Command::Apply {
             filename,
@@ -1696,6 +1675,66 @@ fn read_apply_request_in(
         create_only: false,
         agent,
     })
+}
+
+/// Signs in to a harness on the host, or stores a credential read from standard input.
+async fn harness_login(
+    home: &ControlPlaneHome,
+    client: &Client,
+    harness: agent::Harness,
+    from_stdin: bool,
+) -> CommandResult<()> {
+    let credential = match (from_stdin, harness) {
+        (true, agent::Harness::ClaudeCode) => read_token_from_stdin()?,
+        (true, agent::Harness::Codex) => read_stdin_to_end()?,
+        (false, harness) => agent::harness::acquire_host_credential(harness, home.path())?,
+    };
+    let imported = client.auth_login(harness, credential.to_string(), from_stdin).await?;
+    println!("{} authentication stored", imported.provider);
+    Ok(())
+}
+
+/// Stores the GitHub token Agents use, asking for it unless it comes from standard input or `gh`.
+async fn github_login(client: &Client, from_stdin: bool, from_gh: bool) -> CommandResult<agent::github::GithubAccount> {
+    let token = if from_stdin {
+        read_token_from_stdin()?
+    } else if from_gh {
+        agent::github::token_from_gh()?
+    } else {
+        ask_for_github_token()?
+    };
+    let account = client.github_login(token.to_string()).await?;
+    println!(
+        "Agents with the GitHub account now act as {} and commit as {} <{}>",
+        account.login, account.name, account.email
+    );
+    Ok(account)
+}
+
+/// Attaches to a new Session with the first free name, `s1`, `s2` and so on.
+async fn attach_new_session(home: &ControlPlaneHome, client: &Client, agent: &str) -> CommandResult<()> {
+    let taken: Vec<String> = client
+        .list_sessions(Some(agent))
+        .await?
+        .into_iter()
+        .map(|session| session.name.to_string())
+        .collect();
+    // One of the first `taken.len() + 1` names is always free.
+    let name = (1..=taken.len() + 1)
+        .map(|number| format!("s{number}"))
+        .find(|name| !taken.contains(name))
+        .unwrap_or_else(|| "s1".into());
+    eprintln!("Attaching to session/{name}; detach with Ctrl-b d, and run `agentctl attach session/{name}` to return.");
+    attach(
+        home,
+        client,
+        "session",
+        Some(name),
+        Some(agent.to_owned()),
+        None,
+        SessionSelection::default(),
+    )
+    .await
 }
 
 fn ask_for_github_token() -> Result<zeroize::Zeroizing<String>, Error> {

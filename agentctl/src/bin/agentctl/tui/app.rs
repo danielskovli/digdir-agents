@@ -1936,6 +1936,12 @@ impl App {
         }
     }
 
+    /// Whether the create-Agent form has closed with nothing left to open it again: discovery
+    /// has finished and the form was cancelled or submitted.
+    pub(crate) const fn create_closed(&self) -> bool {
+        self.modal.is_none() && !self.discovering && self.queued_candidates.is_none()
+    }
+
     /// Opens the create-agent modal for candidates queued behind another view once it closes.
     pub(crate) fn open_queued_create(&mut self) {
         if self.idle()
@@ -3783,6 +3789,17 @@ mod tests {
         app.discovering = true;
         app.manifests_discovered(candidates(&[("/sources/worker", "worker")]));
         assert_eq!(create_form(&app).placeholder(&app.agents).as_deref(), Some("worker-1"));
+    }
+
+    #[test]
+    fn the_create_form_counts_as_closed_only_after_discovery_and_cancelling() {
+        let mut app = App::new();
+        app.discovering = true;
+        assert!(!app.create_closed(), "discovery is still running");
+        app.manifests_discovered(candidates(&[("/sources/worker", "worker")]));
+        assert!(!app.create_closed(), "the form is open");
+        assert_eq!(app.on_key(key(KeyCode::Esc)), Action::None);
+        assert!(app.create_closed());
     }
 
     #[test]

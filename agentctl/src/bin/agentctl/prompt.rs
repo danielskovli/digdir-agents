@@ -11,6 +11,19 @@ pub(crate) fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
+/// Asks a yes-or-no question on standard error; anything but `y` or `yes` is no.
+///
+/// # Errors
+///
+/// Returns an error when standard input cannot be read.
+pub(crate) fn confirm(question: &str) -> Result<bool, Error> {
+    eprint!("{question} [y/N] ");
+    std::io::stderr().flush().ok();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
 /// Reads a secret typed or pasted on the terminal without echoing it.
 ///
 /// # Errors

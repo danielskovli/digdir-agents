@@ -31,6 +31,11 @@ irm https://raw.githubusercontent.com/digdir/digdir-agents/main/agentctl/install
 
 Update an installation with `agentctl self update`.
 
+Then, in any repository, run `agentctl init`. It offers the Claude Code or Codex login when neither is stored, and the
+GitHub account login when none is, writes an `agent.yaml` at the repository root when the checkout has no manifest,
+and creates the Agent through the same form as `agentctl tui`. Once the Agent is Ready it offers to open a Session.
+The written manifest starts from the published self-development image; edit it like any other.
+
 ## Development
 
 Run `make help` at the repository root for the supported development commands. `make user-install` builds, packages and

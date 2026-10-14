@@ -248,6 +248,27 @@ pub struct ImportedAuthentication {
     pub ready: bool,
 }
 
+/// Which host logins Agents can use, without any credential.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthenticationStatus {
+    /// Whether `agentctl claude login` has stored a Claude Code credential.
+    pub claude_code: bool,
+    /// Whether `agentctl codex login` has stored a Codex credential.
+    pub codex: bool,
+    /// The account `agentctl github login` stored, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<crate::github::GithubAccount>,
+}
+
+impl AuthenticationStatus {
+    /// Whether at least one harness can run Sessions.
+    #[must_use]
+    pub const fn any_harness(&self) -> bool {
+        self.claude_code || self.codex
+    }
+}
+
 /// Dispatches host-side authentication to the selected harness adapter or the GitHub account.
 pub struct AuthenticationManager {
     database: persistence::Database,
@@ -266,6 +287,19 @@ impl AuthenticationManager {
             codex: codex::authentication::Authentication::new(database.clone()),
             github: crate::github::Authentication::new(database),
         }
+    }
+
+    /// Reports which host logins are stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be read.
+    pub async fn status(&self) -> Result<AuthenticationStatus, Error> {
+        Ok(AuthenticationStatus {
+            claude_code: authentication_ready(Harness::ClaudeCode, &self.database).await?,
+            codex: authentication_ready(Harness::Codex, &self.database).await?,
+            github: crate::github::account(&self.database).await?,
+        })
     }
 
     /// Stores the GitHub token Agents with the GitHub account use, returning its account.
