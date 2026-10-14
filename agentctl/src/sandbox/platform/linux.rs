@@ -214,8 +214,10 @@ impl Linux {
         configure_podman(sandbox).await?;
         step.complete().await;
         let step = steps.start_step("Sync home").await;
-        let archive = archive_home(record.source_directory.clone(), record.agent.spec.home.source.clone()).await?;
-        sync_home(sandbox, archive).await?;
+        if let Some(home) = &record.agent.spec.home {
+            let archive = archive_home(record.source_directory.clone(), home.source.clone()).await?;
+            sync_home(sandbox, archive).await?;
+        }
         configure_git_identity(sandbox).await?;
         step.complete().await;
         let instructions = read_instructions(record).await?;

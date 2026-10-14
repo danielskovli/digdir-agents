@@ -12,6 +12,10 @@ Agents. The Rust workspace version is a build detail and is not tracked here.
 
 ## [Unreleased]
 
+### Changed
+
+- An Agent manifest no longer needs `home` or `network`: without `home` nothing is copied into `/home/agent`, and without `network` all traffic goes through the host's network mediator, as before.
+
 ## [0.1.0-preview.11] - 2026-10-12
 
 ### Changed
