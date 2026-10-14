@@ -34,7 +34,8 @@ Update an installation with `agentctl self update`.
 Then, in any repository, run `agentctl init`. It offers the Claude Code or Codex login when neither is stored, and the
 GitHub account login when none is, writes an `agent.yaml` at the repository root when the checkout has no manifest,
 and creates the Agent through the same form as `agentctl tui`. Once the Agent is Ready it offers to open a Session.
-The written manifest starts from the published self-development image; edit it like any other. `agentctl` on its own asks
+The written manifest starts from the published self-development image, which clones its own repositories rather
+than yours; it includes a commented-out mount of the checkout for working on it directly. Edit it like any other. `agentctl` on its own asks
 whether to open the current directory's Agent in `agentctl tui`, or to set one up when there is none, and prints the
 help when you decline. `attach`, `exec` and `ssh` likewise offer `init` when they would use the current directory's
 Agent and find none. Both ask only when a person is at the terminal; scripts get the usual error.
@@ -228,6 +229,8 @@ An Agent opts in with `spec.accounts: [{type: github}]`. Its Sandbox then sees a
 network mediator replaces only in requests to `github.com`, `api.github.com`, `gist.github.com` and
 `uploads.github.com`; a manifest cannot widen that list. The account's identity applies unless the manifest selects
 `GIT_USER_NAME` and `GIT_USER_EMAIL` itself. A manifest with the account cannot also bind its own `GITHUB_TOKEN`.
+Signing in again as a different account changes that identity, which restarts running Agents with the account on
+their next pass, as any change to a Sandbox's environment does.
 
 SQLite `secure_delete` and owner-only filesystem permissions provide local hygiene. They are not a cryptographic
 erasure guarantee across WAL history, filesystem snapshots or backups.

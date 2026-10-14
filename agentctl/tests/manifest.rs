@@ -591,6 +591,11 @@ fn the_github_account_is_opt_in_and_owns_github_token() {
         manifest::decode(&manifest_with_access(&format!("  accounts:\n    - type: github\n{own_placeholder}"))),
         Err(agent::Error::Invalid(message)) if message.contains("spec.secrets[0]")
     ));
+    let overlapping = "  secrets:\n    - environment: GH_TOKEN\n      placeholder: github_pat_AGENT_MEDIATED\n      allowedHosts: [github.com]\n";
+    assert!(matches!(
+        manifest::decode(&manifest_with_access(&format!("  accounts:\n    - type: github\n{overlapping}"))),
+        Err(agent::Error::Invalid(message)) if message.contains("spec.secrets[0]")
+    ));
     assert!(matches!(
         manifest::decode(&manifest_with_access("  accounts:\n    - type: github\n  environment:\n    - name: GITHUB_TOKEN\n")),
         Err(agent::Error::Invalid(message)) if message.contains("spec.environment[0]")

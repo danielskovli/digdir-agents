@@ -166,6 +166,7 @@ async fn github_account(
     }
     let (secret, account) = crate::github::prepare(database).await?;
     managed_secrets.push(secret);
+    // Validation requires GIT_USER_NAME and GIT_USER_EMAIL together, so one stands for both.
     if spec.environment.iter().any(|variable| variable.name == GIT_USER_NAME) {
         return Ok(Vec::new());
     }
@@ -219,7 +220,13 @@ spec:
 
     /// A Preparation over a database holding a GitHub account and a harness login, with the
     /// installation of that harness.
-    async fn signed_in(directory: &tempfile::TempDir) -> (super::Preparation, crate::HarnessSpec) {
+    async fn signed_in(
+        directory: &tempfile::TempDir,
+    ) -> (
+        super::Preparation,
+        crate::HarnessSpec,
+        std::rc::Rc<crate::authorization::AgentPolicyEngine>,
+    ) {
         let database = crate::persistence::Database::open(&directory.path().join("agent.db")).expect("database");
         let installation = crate::harness::signed_in_installation(&database).await;
         database
@@ -237,7 +244,38 @@ spec:
             .expect("store account");
         let policy = std::rc::Rc::new(crate::authorization::AgentPolicyEngine::new());
         let network = std::rc::Rc::new(sandbox_microsandbox::MicrosandboxNetworkBackend::new(policy.clone()));
-        (super::Preparation::new(database, policy, network), installation)
+        (
+            super::Preparation::new(database, policy.clone(), network),
+            installation,
+            policy,
+        )
+    }
+
+    /// Whether the policy lets the Agent's Sandbox use `secret` in a request to `host`.
+    async fn may_use(
+        policy: &crate::authorization::AgentPolicyEngine,
+        record: &crate::control_plane::AgentRecord,
+        secret: &str,
+        host: &str,
+    ) -> bool {
+        use sandbox_authorization::{
+            Action, AuthorizationContext, AuthorizationDecision, AuthorizationRequest, PolicyEngine as _, Principal,
+            Resource,
+            vocabulary::{action, context, principal_kind, resource_kind},
+        };
+        let sandbox = record.sandbox_name().expect("Sandbox name");
+        let decision = policy
+            .evaluate(AuthorizationRequest {
+                principal: Principal::new(principal_kind::SANDBOX, "sandbox-id"),
+                action: Action::new(action::SECRET_USE),
+                resource: Resource::new(resource_kind::SECRET, secret),
+                context: AuthorizationContext::new()
+                    .with_attribute(context::SANDBOX_NAME, sandbox.as_str())
+                    .with_attribute(context::HTTP_AUTHORITY, host),
+            })
+            .await
+            .expect("policy decision");
+        decision == AuthorizationDecision::Allow
     }
 
     fn record(
@@ -260,12 +298,10 @@ spec:
     #[tokio::test(flavor = "local")]
     async fn the_github_account_mediates_its_token_and_supplies_the_git_identity() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
-        let (preparation, installation) = signed_in(&directory).await;
+        let (preparation, installation, policy) = signed_in(&directory).await;
 
-        let prepared = preparation
-            .prepare(&record(&directory, MANIFEST, installation))
-            .await
-            .expect("prepare");
+        let record = record(&directory, MANIFEST, installation);
+        let prepared = preparation.prepare(&record).await.expect("prepare");
 
         assert_eq!(
             prepared.environment.get("GITHUB_TOKEN").map(String::as_str),
@@ -284,12 +320,18 @@ spec:
             "no real credential enters the guest: {:?}",
             prepared.environment
         );
+        for host in ["github.com", "api.github.com", "gist.github.com", "uploads.github.com"] {
+            assert!(may_use(&policy, &record, "GITHUB_TOKEN", host).await, "{host}");
+        }
+        for host in ["evil.example", "x.github.com", "github.com.evil.example"] {
+            assert!(!may_use(&policy, &record, "GITHUB_TOKEN", host).await, "{host}");
+        }
     }
 
     #[tokio::test(flavor = "local")]
     async fn a_manifest_git_identity_wins_over_the_github_account() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
-        let (preparation, installation) = signed_in(&directory).await;
+        let (preparation, installation, _policy) = signed_in(&directory).await;
         let manifest = format!("{MANIFEST}  environment:\n    - name: GIT_USER_NAME\n    - name: GIT_USER_EMAIL\n");
 
         let prepared = preparation
@@ -305,7 +347,7 @@ spec:
     #[tokio::test(flavor = "local")]
     async fn an_agent_without_the_account_gets_no_github_token() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
-        let (preparation, installation) = signed_in(&directory).await;
+        let (preparation, installation, _policy) = signed_in(&directory).await;
         let manifest = MANIFEST.replace("  accounts:\n    - type: github\n", "");
 
         let prepared = preparation

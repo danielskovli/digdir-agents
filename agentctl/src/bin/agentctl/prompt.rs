@@ -6,9 +6,10 @@ use agent::Error;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use zeroize::Zeroizing;
 
-/// Whether both standard input and standard error are a terminal a person can answer on.
+/// Whether a person is at the terminal: questions go to standard error, and the TUI some answers
+/// open draws on standard output, so all three must be a terminal.
 pub(crate) fn interactive() -> bool {
-    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && std::io::stderr().is_terminal()
 }
 
 /// Asks a yes-or-no question on standard error; anything but `y` or `yes` is no.

@@ -526,7 +526,8 @@ async fn without_command(home: &ControlPlaneHome, client: &Client) -> CommandRes
     use clap::CommandFactory as _;
 
     if !prompt::interactive() {
-        Arguments::command().print_help().map_err(Error::from)?;
+        // As clap reports a missing command: the help on standard error, exit code 2.
+        eprint!("{}", Arguments::command().render_help());
         return Ok(ExitCode::from(2));
     }
     self_update::resume_pending_before_command(home)?;
@@ -548,26 +549,32 @@ async fn without_command(home: &ControlPlaneHome, client: &Client) -> CommandRes
                 return Ok(ExitCode::SUCCESS);
             }
         }
-        Err(error) => eprintln!("agentctl: {}", inference_error(error)),
+        Err(error) => return Err(inference_error(error)),
     }
     Arguments::command().print_help().map_err(Error::from)?;
     Ok(ExitCode::SUCCESS)
 }
 
 /// Offers `agentctl init` before a command that would use the current directory's Agent finds
-/// none. Only when a person is at the terminal and no Agent was named: scripts get the usual error.
-async fn offer_init_if_missing(home: &ControlPlaneHome, client: &Client, inferred: bool) -> CommandResult<()> {
+/// none, returning the Agent it set up. The command then targets that Agent by name, which also
+/// covers one created from a manifest in another directory of the checkout. Only when a person
+/// is at the terminal and no Agent was named: scripts get the usual error.
+async fn offer_init_if_missing(
+    home: &ControlPlaneHome,
+    client: &Client,
+    inferred: bool,
+) -> CommandResult<Option<String>> {
     if !inferred || !prompt::interactive() {
-        return Ok(());
+        return Ok(None);
     }
     let directory = std::env::current_dir().map_err(Error::from)?;
     if let Err(Error::Rpc(error)) = client.resolve_agent_variant(directory, None).await
         && error.is_not_found()
         && prompt::confirm("No Agent was applied from this directory. Set one up now?")?
     {
-        Box::pin(init::run(home, client)).await?;
+        return Box::pin(init::run(home, client)).await;
     }
-    Ok(())
+    Ok(None)
 }
 
 #[allow(
@@ -682,7 +689,8 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
             resource,
             command,
         } => {
-            offer_init_if_missing(home, client, resource.is_none() && agent.is_none() && variant.is_none()).await?;
+            let inferred = resource.is_none() && agent.is_none() && variant.is_none();
+            let agent = agent.or(offer_init_if_missing(home, client, inferred).await?);
             return ssh(client, resource, agent, variant, &command).await;
         }
         Command::SshProxy { resource } => return ssh_proxy(home, client, resource).await,
@@ -818,7 +826,8 @@ async fn attach(
         return Err(Error::Invalid("attach requires a Session resource".into()).into());
     }
     let session = SessionName::new(require_name(name, "Session")?)?;
-    offer_init_if_missing(home, client, agent.is_none() && variant.is_none()).await?;
+    let inferred = agent.is_none() && variant.is_none();
+    let agent = agent.or(offer_init_if_missing(home, client, inferred).await?);
     let agent = resolve_agent_name(client, agent, variant).await?;
     let wait = progress::Wait::start();
     let target = wait
@@ -846,7 +855,8 @@ async fn exec_command(
     stdin: bool,
     tty: bool,
 ) -> CommandResult<ExitCode> {
-    offer_init_if_missing(home, client, resource.is_none() && agent.is_none() && variant.is_none()).await?;
+    let inferred = resource.is_none() && agent.is_none() && variant.is_none();
+    let agent = agent.or(offer_init_if_missing(home, client, inferred).await?);
     let agent = resolve_execution_agent(client, resource, agent, variant).await?;
     if tty && (!std::io::stdin().is_terminal() || !std::io::stdout().is_terminal()) {
         return Err(Error::Invalid("-it requires an interactive local terminal".into()).into());

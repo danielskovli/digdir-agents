@@ -41,15 +41,28 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResu
             "Agents can act as a GitHub account, such as a bot, to clone, push and open pull requests. Sign in to one now?",
         )?
     {
-        status.github = Some(crate::github_login(client, false, false).await?);
+        // Optional: a token GitHub refuses leaves the Agent without the account, not without init.
+        match crate::github_login(client, false, false).await {
+            Ok(account) => status.github = Some(account),
+            Err(error) => eprintln!("agentctl: {error}; continuing without the GitHub account"),
+        }
     }
     if crate::tui::working_tree_manifests(&directory).is_empty() {
         let manifest = manifest_location(&directory);
         let root = manifest.parent().unwrap_or(&directory);
+        if manifest.exists() {
+            // Discovery honours ignore files, so an ignored manifest is not offered; never replace it.
+            return Err(Error::Invalid(format!(
+                "{} exists but is ignored by Git, so `agentctl init` cannot offer it; run `agentctl apply -f {}`",
+                manifest.display(),
+                manifest.display()
+            ))
+            .into());
+        }
         if !prompt::confirm(&format!("No Agent manifest here. Write {}?", manifest.display()))? {
             return Ok(None);
         }
-        std::fs::write(&manifest, template(&agent_name(root), &status)).map_err(Error::from)?;
+        write_new(&manifest, &template(&agent_name(root), &status))?;
         eprintln!(
             "Wrote {}; edit it to change the image, resources or access.",
             manifest.display()
@@ -61,6 +74,15 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResu
     crate::wait_until_converged(client, &name, std::time::Duration::from_mins(10)).await?;
     eprintln!("Agent {name} is ready.");
     Ok(Some(name))
+}
+
+/// Creates `path` with `contents`, refusing to replace a file that appeared meanwhile.
+fn write_new(path: &Path, contents: &str) -> Result<(), Error> {
+    use std::io::Write as _;
+
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(contents.as_bytes())?;
+    Ok(())
 }
 
 /// Offers the Claude Code login, then the Codex one, returning whether either was stored.
@@ -115,7 +137,9 @@ fn template(name: &str, status: &AuthenticationStatus) -> String {
     if status.codex {
         harnesses.push_str("    - type: codex\n      auth: mediated\n");
         if status.claude_code {
-            harnesses.push_str("      # Left out while this host has no Codex login.\n      optional: true\n");
+            harnesses.push_str(
+                "      # Optional, so the Agent is still created on a host without a Codex login.\n      optional: true\n",
+            );
         }
     }
     let accounts = if status.github.is_some() {
@@ -143,6 +167,13 @@ spec:
         capacity: \"64Gi\"
         mode: layered
     initSystem: image
+    # The image clones its own repositories into /home/agent/code. To work on this checkout
+    # instead, uncomment the mount; mounts cannot change once the Agent exists.
+    # mounts:
+    #   - type: bind
+    #     source: .
+    #     target: /home/agent/code/{name}
+    #     readOnly: false
   harnesses:
 {harnesses}{accounts}  access:
     - type: ssh
@@ -225,6 +256,29 @@ mod tests {
         assert_eq!(agent_name(Path::new("/src/_hidden_")), "hidden");
         assert_eq!(agent_name(Path::new("/")), "agent");
         assert_eq!(agent_name(Path::new("/src/---")), "agent");
+    }
+
+    #[test]
+    fn the_template_offers_this_checkout_as_a_commented_mount() {
+        let text = template("worker", &status(true, false, false));
+        let uncommented = text
+            .replace("    # mounts:", "    mounts:")
+            .replace("    #   ", "      ");
+        let agent = decoded(&uncommented);
+        assert!(matches!(
+            agent.spec.sandbox.mounts.as_slice(),
+            [agent::MountSpec::Bind { source, target, read_only: false }]
+                if source == Path::new(".") && target.as_str() == "/home/agent/code/worker"
+        ));
+    }
+
+    #[test]
+    fn a_new_manifest_never_replaces_an_existing_file() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let path = directory.path().join("agent.yaml");
+        std::fs::write(&path, "mine").expect("existing manifest");
+        write_new(&path, "template").expect_err("an existing file is kept");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "mine");
     }
 
     #[test]

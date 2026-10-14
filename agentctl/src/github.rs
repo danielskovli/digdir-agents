@@ -176,9 +176,13 @@ pub(crate) async fn prepare(database: &persistence::Database) -> Result<(Mediate
     Ok((secret, account))
 }
 
-/// Whether a manifest secret would collide with the binding the GitHub account owns.
+/// Whether a manifest secret would collide with the binding the GitHub account owns. Mediation
+/// needs placeholders that never contain one another, so overlapping ones are refused at apply.
 pub(crate) fn conflicts_with_managed_secret(name: &str, placeholder: Option<&str>) -> bool {
-    name == ACCESS_ENVIRONMENT || placeholder == Some(ACCESS_PLACEHOLDER)
+    name == ACCESS_ENVIRONMENT
+        || placeholder.is_some_and(|placeholder| {
+            placeholder.contains(ACCESS_PLACEHOLDER) || ACCESS_PLACEHOLDER.contains(placeholder)
+        })
 }
 
 /// Reads the token of the host's active `gh` login, for an explicit `--from-gh` import.

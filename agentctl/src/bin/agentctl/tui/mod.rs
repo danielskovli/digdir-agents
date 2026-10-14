@@ -289,8 +289,13 @@ async fn drive(home: &ControlPlaneHome, client: &Client, mode: Mode) -> CommandR
                     tui.restore()?;
                     return Ok(None);
                 }
+                // Until the create form opens, the fleet behind it is not this mode's to act on.
+                if mode == Mode::Create && app.modal.is_none() {
+                    continue;
+                }
                 app.on_key(key)
             }
+            Input::Event(Some(Ok(Event::Mouse(_)))) if mode == Mode::Create && app.modal.is_none() => continue,
             Input::Event(Some(Ok(Event::Mouse(event)))) => mouse.action(event, &hit_map, &mut app, Instant::now()),
             Input::Event(Some(Ok(_))) => {
                 mouse.reset();
