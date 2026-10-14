@@ -34,7 +34,10 @@ Update an installation with `agentctl self update`.
 Then, in any repository, run `agentctl init`. It offers the Claude Code or Codex login when neither is stored, and the
 GitHub account login when none is, writes an `agent.yaml` at the repository root when the checkout has no manifest,
 and creates the Agent through the same form as `agentctl tui`. Once the Agent is Ready it offers to open a Session.
-The written manifest starts from the published self-development image; edit it like any other.
+The written manifest starts from the published self-development image; edit it like any other. `agentctl` on its own asks
+whether to open the current directory's Agent in `agentctl tui`, or to set one up when there is none, and prints the
+help when you decline. `attach`, `exec` and `ssh` likewise offer `init` when they would use the current directory's
+Agent and find none. Both ask only when a person is at the terminal; scripts get the usual error.
 
 ## Development
 

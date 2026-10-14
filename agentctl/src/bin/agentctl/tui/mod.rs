@@ -169,13 +169,15 @@ enum Mode {
 }
 
 pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResult<ExitCode> {
-    drive(home, client, Mode::Fleet).await.map(|_| ExitCode::SUCCESS)
+    Box::pin(drive(home, client, Mode::Fleet))
+        .await
+        .map(|_| ExitCode::SUCCESS)
 }
 
 /// Shows only the create-Agent form for the manifests in the working tree, returning the name of
 /// the Agent it created, or `None` when the form was cancelled.
 pub(crate) async fn create_agent_here(home: &ControlPlaneHome, client: &Client) -> CommandResult<Option<String>> {
-    drive(home, client, Mode::Create).await
+    Box::pin(drive(home, client, Mode::Create)).await
 }
 
 #[allow(clippy::too_many_lines)]

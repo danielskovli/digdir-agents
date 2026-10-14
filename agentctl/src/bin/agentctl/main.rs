@@ -37,8 +37,9 @@ struct Arguments {
     /// Agent control-plane home.
     #[arg(long, global = true)]
     home: Option<PathBuf>,
+    /// Without one, `agentctl` offers to open or set up the current directory's Agent.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -502,17 +503,71 @@ fn run() -> CommandResult<ExitCode> {
     let home = ControlPlaneHome::resolve(arguments.home.as_deref())?;
     let client = Client::for_path(home.socket_path());
     LocalRuntime::new().map_err(Error::from)?.block_on(async move {
-        if !matches!(arguments.command, Command::Self_ { .. }) {
+        let Some(command) = arguments.command else {
+            return without_command(&home, &client).await;
+        };
+        if !matches!(command, Command::Self_ { .. }) {
             self_update::resume_pending_before_command(&home)?;
         }
         if !matches!(
-            arguments.command,
+            command,
             Command::Create { .. } | Command::Prompt { .. } | Command::Self_ { .. } | Command::SshConfig { .. }
         ) {
             ensure_daemon(&home, &client).await?;
         }
-        execute(arguments.command, &home, &client).await
+        execute(command, &home, &client).await
     })
+}
+
+/// `agentctl` on its own: asks whether to open the current directory's Agent in the TUI, or to
+/// set one up when there is none, and prints the help otherwise. Nothing starts unasked, so a
+/// mistyped command costs one answer.
+async fn without_command(home: &ControlPlaneHome, client: &Client) -> CommandResult<ExitCode> {
+    use clap::CommandFactory as _;
+
+    if !prompt::interactive() {
+        Arguments::command().print_help().map_err(Error::from)?;
+        return Ok(ExitCode::from(2));
+    }
+    self_update::resume_pending_before_command(home)?;
+    ensure_daemon(home, client).await?;
+    let directory = std::env::current_dir().map_err(Error::from)?;
+    match client.resolve_agent_variant(directory, None).await {
+        Ok(agent) => {
+            if prompt::confirm(&format!("Open Agent {} in agentctl tui?", agent.metadata.name))? {
+                return tui::run(home, client).await;
+            }
+        }
+        Err(Error::Rpc(error)) if error.is_not_found() => {
+            if prompt::confirm("No Agent was applied from this directory. Set one up now?")? {
+                if let Some(name) = Box::pin(init::run(home, client)).await?
+                    && prompt::confirm(&format!("Open a Session on {name} now?"))?
+                {
+                    attach_new_session(home, client, &name).await?;
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+        }
+        Err(error) => eprintln!("agentctl: {}", inference_error(error)),
+    }
+    Arguments::command().print_help().map_err(Error::from)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Offers `agentctl init` before a command that would use the current directory's Agent finds
+/// none. Only when a person is at the terminal and no Agent was named: scripts get the usual error.
+async fn offer_init_if_missing(home: &ControlPlaneHome, client: &Client, inferred: bool) -> CommandResult<()> {
+    if !inferred || !prompt::interactive() {
+        return Ok(());
+    }
+    let directory = std::env::current_dir().map_err(Error::from)?;
+    if let Err(Error::Rpc(error)) = client.resolve_agent_variant(directory, None).await
+        && error.is_not_found()
+        && prompt::confirm("No Agent was applied from this directory. Set one up now?")?
+    {
+        Box::pin(init::run(home, client)).await?;
+    }
+    Ok(())
 }
 
 #[allow(
@@ -534,7 +589,7 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
             github_login(client, from_stdin, from_gh).await?;
         }
         Command::Init => {
-            if let Some(name) = init::run(home, client).await?
+            if let Some(name) = Box::pin(init::run(home, client)).await?
                 && prompt::confirm(&format!("Open a Session on {name} now?"))?
             {
                 attach_new_session(home, client, &name).await?;
@@ -626,7 +681,10 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
             variant,
             resource,
             command,
-        } => return ssh(client, resource, agent, variant, &command).await,
+        } => {
+            offer_init_if_missing(home, client, resource.is_none() && agent.is_none() && variant.is_none()).await?;
+            return ssh(client, resource, agent, variant, &command).await;
+        }
         Command::SshProxy { resource } => return ssh_proxy(home, client, resource).await,
         Command::SshConfig {
             command: SshConfigCommand::Install,
@@ -760,6 +818,7 @@ async fn attach(
         return Err(Error::Invalid("attach requires a Session resource".into()).into());
     }
     let session = SessionName::new(require_name(name, "Session")?)?;
+    offer_init_if_missing(home, client, agent.is_none() && variant.is_none()).await?;
     let agent = resolve_agent_name(client, agent, variant).await?;
     let wait = progress::Wait::start();
     let target = wait
@@ -787,6 +846,7 @@ async fn exec_command(
     stdin: bool,
     tty: bool,
 ) -> CommandResult<ExitCode> {
+    offer_init_if_missing(home, client, resource.is_none() && agent.is_none() && variant.is_none()).await?;
     let agent = resolve_execution_agent(client, resource, agent, variant).await?;
     if tty && (!std::io::stdin().is_terminal() || !std::io::stdout().is_terminal()) {
         return Err(Error::Invalid("-it requires an interactive local terminal".into()).into());
@@ -1995,7 +2055,9 @@ mod tests {
                 "xhigh",
             ])
             .expect("model and effort parse");
-            let (Command::Create { selection, .. } | Command::Attach { selection, .. }) = arguments.command else {
+            let (Command::Create { selection, .. } | Command::Attach { selection, .. }) =
+                arguments.command.expect("a command")
+            else {
                 panic!("expected a Session creation command");
             };
             let request = selection.request(None);
@@ -2004,7 +2066,9 @@ mod tests {
             assert_eq!(request.harness, None);
 
             let omitted = Arguments::try_parse_from(["agentctl", verb, "session/s1"]).expect("omitted selections");
-            let (Command::Create { selection, .. } | Command::Attach { selection, .. }) = omitted.command else {
+            let (Command::Create { selection, .. } | Command::Attach { selection, .. }) =
+                omitted.command.expect("a command")
+            else {
                 panic!("expected a Session creation command");
             };
             assert_eq!(selection.request(None), SessionRequest::default());
@@ -2036,6 +2100,27 @@ mod tests {
     }
 
     #[test]
+    fn agentctl_without_a_command_parses_and_init_is_a_command() {
+        let bare = Arguments::try_parse_from(["agentctl", "--home", "/tmp/agent"]).expect("no command");
+        assert!(bare.command.is_none());
+        let init = Arguments::try_parse_from(["agentctl", "init"]).expect("init");
+        assert!(matches!(init.command, Some(Command::Init)));
+        let login = Arguments::try_parse_from(["agentctl", "github", "login", "--from-gh"]).expect("github login");
+        assert!(matches!(
+            login.command,
+            Some(Command::Github {
+                command: GithubCommand::Login {
+                    from_stdin: false,
+                    from_gh: true
+                }
+            })
+        ));
+        Arguments::try_parse_from(["agentctl", "github", "login", "--from-gh", "--from-stdin"])
+            .err()
+            .expect("one token source");
+    }
+
+    #[test]
     fn exec_accepts_kubectl_style_interactive_and_inferred_shapes() {
         let explicit = Arguments::try_parse_from(["agentctl", "exec", "-it", "agent/worker", "--", "bash", "-l"])
             .expect("interactive exec arguments");
@@ -2046,7 +2131,7 @@ mod tests {
             agent,
             command,
             ..
-        } = explicit.command
+        } = explicit.command.expect("a command")
         else {
             panic!("expected exec command");
         };
@@ -2057,7 +2142,7 @@ mod tests {
         assert_eq!(command, ["bash", "-l"]);
 
         let inferred = Arguments::try_parse_from(["agentctl", "exec", "--", "pwd"]).expect("inferred exec arguments");
-        let Command::Exec { resource, command, .. } = inferred.command else {
+        let Command::Exec { resource, command, .. } = inferred.command.expect("a command") else {
             panic!("expected exec command");
         };
         assert!(resource.is_none());
@@ -2068,7 +2153,7 @@ mod tests {
     fn port_forward_accepts_kubectl_shapes_and_inference() {
         let explicit = Arguments::try_parse_from(["agentctl", "port-forward", "agent/worker", "9090:80", ":5432"])
             .expect("explicit port-forward arguments");
-        let Command::PortForward { agent, arguments, .. } = explicit.command else {
+        let Command::PortForward { agent, arguments, .. } = explicit.command.expect("a command") else {
             panic!("expected port-forward command");
         };
         assert!(agent.is_none());
@@ -2079,14 +2164,14 @@ mod tests {
 
         let inferred =
             Arguments::try_parse_from(["agentctl", "port-forward", "8080"]).expect("inferred port-forward arguments");
-        let Command::PortForward { arguments, .. } = inferred.command else {
+        let Command::PortForward { arguments, .. } = inferred.command.expect("a command") else {
             panic!("expected port-forward command");
         };
         assert_eq!(split_forward_arguments(&arguments), (None, arguments.as_slice()));
 
         let flagged = Arguments::try_parse_from(["agentctl", "port-forward", "--agent", "worker", "0.0.0.0:80:80"])
             .expect("flagged port-forward arguments");
-        let Command::PortForward { agent, arguments, .. } = flagged.command else {
+        let Command::PortForward { agent, arguments, .. } = flagged.command.expect("a command") else {
             panic!("expected port-forward command");
         };
         assert_eq!(agent.as_deref(), Some("worker"));
@@ -2096,7 +2181,7 @@ mod tests {
     #[test]
     fn apply_defaults_to_agent_yaml_and_accepts_only_variant_names() {
         let default = Arguments::try_parse_from(["agentctl", "apply"]).expect("default apply");
-        let Command::Apply { filename, variant, .. } = default.command else {
+        let Command::Apply { filename, variant, .. } = default.command.expect("a command") else {
             panic!("expected apply command");
         };
         assert!(filename.is_none());
@@ -2108,7 +2193,7 @@ mod tests {
 
         let nested =
             Arguments::try_parse_from(["agentctl", "apply", "--variant", "nested-build"]).expect("variant apply");
-        let Command::Apply { filename, variant, .. } = nested.command else {
+        let Command::Apply { filename, variant, .. } = nested.command.expect("a command") else {
             panic!("expected apply command");
         };
         assert_eq!(
