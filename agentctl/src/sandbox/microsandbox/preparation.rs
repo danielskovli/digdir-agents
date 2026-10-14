@@ -212,58 +212,58 @@ spec:
       rootFilesystem:
         capacity: \"8Gi\"
         mode: layered
-  harnesses:
-    - type: claudeCode
-      auth: mediated
+  harnesses: []
   accounts:
     - type: github
 ";
 
-    /// A database holding Claude and GitHub logins, and the Preparation over it.
-    async fn signed_in(directory: &tempfile::TempDir) -> super::Preparation {
+    /// A Preparation over a database holding a GitHub account and a harness login, with the
+    /// installation of that harness.
+    async fn signed_in(directory: &tempfile::TempDir) -> (super::Preparation, crate::HarnessSpec) {
         let database = crate::persistence::Database::open(&directory.path().join("agent.db")).expect("database");
-        for (provider, secret, metadata) in [
-            ("claude", "claude-access-token", r#"{"kind":"setupToken"}"#),
-            (
-                "github",
-                "github-access-token",
-                r#"{"login":"digdir-bot","name":"Digdir Bot","email":"42+digdir-bot@users.noreply.github.com"}"#,
-            ),
-        ] {
-            database
-                .put_provider_account(crate::persistence::ProviderAccountWrite {
-                    provider: provider.into(),
-                    credentials: vec![crate::persistence::StoredSecret {
-                        name: secret.into(),
-                        value: Zeroizing::new(b"real-token".to_vec()),
-                    }],
-                    metadata_json: metadata.into(),
-                })
-                .await
-                .expect("store account");
-        }
+        let installation = crate::harness::signed_in_installation(&database).await;
+        database
+            .put_provider_account(crate::persistence::ProviderAccountWrite {
+                provider: "github".into(),
+                credentials: vec![crate::persistence::StoredSecret {
+                    name: "github-access-token".into(),
+                    value: Zeroizing::new(b"real-token".to_vec()),
+                }],
+                metadata_json:
+                    r#"{"login":"digdir-bot","name":"Digdir Bot","email":"42+digdir-bot@users.noreply.github.com"}"#
+                        .into(),
+            })
+            .await
+            .expect("store account");
         let policy = std::rc::Rc::new(crate::authorization::AgentPolicyEngine::new());
         let network = std::rc::Rc::new(sandbox_microsandbox::MicrosandboxNetworkBackend::new(policy.clone()));
-        super::Preparation::new(database, policy, network)
+        (super::Preparation::new(database, policy, network), installation)
     }
 
-    fn record(directory: &tempfile::TempDir, manifest: &str) -> crate::control_plane::AgentRecord {
+    fn record(
+        directory: &tempfile::TempDir,
+        manifest: &str,
+        installation: crate::HarnessSpec,
+    ) -> crate::control_plane::AgentRecord {
+        // Decoded without validation, which would need a harness this module does not name.
+        let mut agent: crate::Agent = serde_yaml_ng::from_str(manifest).expect("manifest");
+        agent.spec.harnesses.push(installation);
         crate::control_plane::AgentRecord {
             id: "6a3c1f0e-2b7d-4e59-9c84-0f1d2e3a4b5c".parse().expect("Agent ID"),
             source_directory: directory.path().to_path_buf(),
             manifest_path: None,
             env_file: None,
-            agent: crate::manifest::decode(manifest.as_bytes()).expect("manifest"),
+            agent,
         }
     }
 
     #[tokio::test(flavor = "local")]
     async fn the_github_account_mediates_its_token_and_supplies_the_git_identity() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
-        let preparation = signed_in(&directory).await;
+        let (preparation, installation) = signed_in(&directory).await;
 
         let prepared = preparation
-            .prepare(&record(&directory, MANIFEST))
+            .prepare(&record(&directory, MANIFEST, installation))
             .await
             .expect("prepare");
 
@@ -289,11 +289,11 @@ spec:
     #[tokio::test(flavor = "local")]
     async fn a_manifest_git_identity_wins_over_the_github_account() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
-        let preparation = signed_in(&directory).await;
+        let (preparation, installation) = signed_in(&directory).await;
         let manifest = format!("{MANIFEST}  environment:\n    - name: GIT_USER_NAME\n    - name: GIT_USER_EMAIL\n");
 
         let prepared = preparation
-            .prepare(&record(&directory, &manifest))
+            .prepare(&record(&directory, &manifest, installation))
             .await
             .expect("prepare");
 
@@ -305,11 +305,11 @@ spec:
     #[tokio::test(flavor = "local")]
     async fn an_agent_without_the_account_gets_no_github_token() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
-        let preparation = signed_in(&directory).await;
+        let (preparation, installation) = signed_in(&directory).await;
         let manifest = MANIFEST.replace("  accounts:\n    - type: github\n", "");
 
         let prepared = preparation
-            .prepare(&record(&directory, &manifest))
+            .prepare(&record(&directory, &manifest, installation))
             .await
             .expect("prepare");
 

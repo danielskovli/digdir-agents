@@ -391,6 +391,21 @@ pub(crate) async fn prepare(harness: Harness, database: &persistence::Database) 
     }
 }
 
+/// A harness installation whose host login is stored in `database`, so code outside the
+/// adapters can test with a harness without naming one.
+#[cfg(test)]
+pub(crate) async fn signed_in_installation(database: &persistence::Database) -> HarnessSpec {
+    claude_code::store_test_login(database).await;
+    HarnessSpec {
+        kind: Harness::ClaudeCode,
+        version: None,
+        auth: HarnessAuthMode::Mediated,
+        optional: false,
+        default: false,
+        defaults: ModelSelection::default(),
+    }
+}
+
 pub(crate) struct MediatedSecret {
     pub(crate) environment: &'static str,
     pub(crate) placeholder: String,
