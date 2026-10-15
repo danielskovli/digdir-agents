@@ -15,7 +15,7 @@ Agents. The Rust workspace version is a build detail and is not tracked here.
 ### Added
 
 - `agentctl init` sets up an Agent for the repository you are in: it signs you in where needed, writes an `agent.yaml` when the repository has none, creates the Agent and offers to open a Session. ([install](https://github.com/digdir/digdir-agents/tree/main/agentctl#install))
-- `agentctl github login` signs in a GitHub account for Agents in the browser, separate from your own `gh` login, and Agents whose manifest lists `accounts: [{type: github}]` use it for GitHub and commit as that account, with no `.env` file. ([GitHub account](https://github.com/digdir/digdir-agents/tree/main/agentctl#github-account))
+- `agentctl github login` signs in a GitHub account for Agents in the browser, separate from your own `gh` login, and Agents whose manifest lists `accounts: [{type: github}]` use it for `gh`, `git push` and the GitHub API and commit as that account, with no `.env` file. ([GitHub account](https://github.com/digdir/digdir-agents/tree/main/agentctl#github-account))
 
 ### Changed
 

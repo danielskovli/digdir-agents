@@ -232,7 +232,9 @@ token belongs to, and that account's name and email, or its noreply address, bec
 An Agent opts in with `spec.accounts: [{type: github}]`. Its Sandbox then sees an inert `GITHUB_TOKEN`, which the
 network mediator replaces only in requests to `github.com`, `api.github.com`, `gist.github.com` and
 `uploads.github.com`; a manifest cannot widen that list. The account's identity applies unless the manifest selects
-`GIT_USER_NAME` and `GIT_USER_EMAIL` itself. A manifest with the account cannot also bind its own `GITHUB_TOKEN`.
+`GIT_USER_NAME` and `GIT_USER_EMAIL` itself. When the image has Git, setup also gives Git the token for GitHub over
+HTTPS and rewrites GitHub's SSH URLs to HTTPS, since the Sandbox has no SSH key, unless the image configured either
+itself. A manifest with the account cannot also bind its own `GITHUB_TOKEN`.
 Signing in again as a different account changes that identity, which restarts running Agents with the account on
 their next pass, as any change to a Sandbox's environment does.
 
