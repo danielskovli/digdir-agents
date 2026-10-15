@@ -200,6 +200,7 @@ async fn drive(home: &ControlPlaneHome, client: &Client, mode: Mode) -> CommandR
     if mode == Mode::Create {
         // Only this working tree: an Agent created from another directory's manifest would belong there.
         app.discovering = true;
+        app.plain_names = true;
         spawn_discovery(inputs.clone(), Vec::new());
     }
     loop {

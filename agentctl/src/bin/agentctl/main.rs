@@ -315,6 +315,8 @@ enum Command {
     },
     /// Set up an agent for the current directory, signing in and writing a manifest as needed.
     Init,
+    /// Show agentd, the stored logins and the current directory's agent at a glance.
+    Status,
     /// Open the interactive terminal UI.
     Tui,
     /// Wait for a resource condition.
@@ -448,6 +450,8 @@ enum ClaudeCommand {
         #[arg(long)]
         from_stdin: bool,
     },
+    /// Say whether agents can use Claude Code; exits with 1 when no login is stored.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -466,6 +470,8 @@ enum CodexCommand {
         #[arg(long)]
         from_stdin: bool,
     },
+    /// Say whether agents can use Codex; exits with 1 when no login is stored.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -634,6 +640,13 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
         Command::Codex {
             command: CodexCommand::Login { from_stdin },
         } => harness_login(home, client, agent::Harness::Codex, from_stdin).await?,
+        Command::Claude {
+            command: ClaudeCommand::Status,
+        } => return harness_status(client, agent::Harness::ClaudeCode).await,
+        Command::Codex {
+            command: CodexCommand::Status,
+        } => return harness_status(client, agent::Harness::Codex).await,
+        Command::Status => status(client).await?,
         Command::Github {
             command:
                 GithubCommand::Login {
@@ -1822,6 +1835,89 @@ fn read_apply_request_in(
     })
 }
 
+/// Says whether a harness login is stored, with exit code 1 when it is not.
+async fn harness_status(client: &Client, harness: agent::Harness) -> CommandResult<ExitCode> {
+    let status = client.auth_status().await?;
+    let (signed_in, label, command) = match harness {
+        agent::Harness::ClaudeCode => (status.claude_code, "Claude Code", "claude"),
+        agent::Harness::Codex => (status.codex, "Codex", "codex"),
+    };
+    if signed_in {
+        println!("{label}: signed in; agents can use it");
+        Ok(ExitCode::SUCCESS)
+    } else {
+        println!("{label}: not signed in; run `agentctl {command} login`");
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Shows agentd, the stored logins and the current directory's agent at a glance.
+async fn status(client: &Client) -> CommandResult<()> {
+    let daemon = client.health().await?;
+    let auth = client.auth_status().await?;
+    let mut rows = vec![(
+        "agentd",
+        format!(
+            "{}, running",
+            daemon.build_version.as_deref().unwrap_or("unknown version")
+        ),
+    )];
+    for (label, signed_in, command) in [
+        ("Claude Code", auth.claude_code, "claude"),
+        ("Codex", auth.codex, "codex"),
+    ] {
+        rows.push((
+            label,
+            if signed_in {
+                "signed in".to_owned()
+            } else {
+                format!("not signed in: agentctl {command} login")
+            },
+        ));
+    }
+    let now = time::OffsetDateTime::now_utc();
+    let github = if auth.github.is_empty() {
+        vec!["no tokens: agentctl github login".to_owned()]
+    } else {
+        auth.github
+            .iter()
+            .map(|token| {
+                let expiry = match token.expires_at {
+                    Some(expires_at) if token.expired(now) => format!("expired {}", expires_at.date()),
+                    Some(expires_at) => format!("expires {}", expires_at.date()),
+                    None => format!("expires {}", token.kind.unstated_expiry()),
+                };
+                format!("{}: {}, {expiry}", token.scope(), token.account.login)
+            })
+            .collect()
+    };
+    for (index, line) in github.into_iter().enumerate() {
+        rows.push((if index == 0 { "GitHub" } else { "" }, line));
+    }
+    let directory = std::env::current_dir().map_err(Error::from)?;
+    let here = match client.resolve_agent_variant(directory, None).await {
+        Ok(agent) => {
+            let ready = agent
+                .status
+                .ready_condition()
+                .map_or("Pending", |condition| condition.reason.as_str());
+            let sessions = client.list_sessions(Some(&agent.metadata.name)).await?.len();
+            format!(
+                "{}, {ready}, {sessions} session{}",
+                agent.metadata.name,
+                if sessions == 1 { "" } else { "s" }
+            )
+        }
+        Err(Error::Rpc(error)) if error.is_not_found() => "no agent: agentctl init".to_owned(),
+        Err(error) => return Err(inference_error(error)),
+    };
+    rows.push(("This directory", here));
+    for (label, value) in rows {
+        println!("{label:<15} {value}");
+    }
+    Ok(())
+}
+
 /// Signs in to a harness on the host, or stores a credential read from standard input.
 async fn harness_login(
     home: &ControlPlaneHome,
@@ -2212,6 +2308,20 @@ mod tests {
                 .command,
             Some(Command::Github {
                 command: GithubCommand::Reset { yes: true }
+            })
+        ));
+        assert!(matches!(
+            Arguments::try_parse_from(["agentctl", "status"])
+                .expect("status")
+                .command,
+            Some(Command::Status)
+        ));
+        assert!(matches!(
+            Arguments::try_parse_from(["agentctl", "claude", "status"])
+                .expect("claude status")
+                .command,
+            Some(Command::Claude {
+                command: ClaudeCommand::Status
             })
         ));
     }

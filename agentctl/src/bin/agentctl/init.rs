@@ -53,10 +53,14 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResu
             return Ok(None);
         }
         write_new(&manifest, &template(&agent_name(root), &status, &github))?;
-        eprintln!(
-            "Wrote {}; edit it to change the image, resources or access.",
-            manifest.display()
-        );
+        eprintln!("Wrote {}.", manifest.display());
+        if prompt::confirm_lines(&[
+            "The image, resources, mounts and access cannot change once the agent exists.",
+            "Edit agent.yaml before creating the agent?",
+        ])? && !edit_manifest(&manifest)?
+        {
+            return Ok(None);
+        }
     }
     let Some(name) = crate::tui::create_agent_here(home, client).await? else {
         return Ok(None);
@@ -64,6 +68,46 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResu
     crate::wait_until_converged(client, &name, std::time::Duration::from_mins(10)).await?;
     eprintln!("The agent {name} is ready.");
     Ok(Some(name))
+}
+
+/// Opens `manifest` in `$VISUAL` or `$EDITOR`, or asks for it to be edited elsewhere, until it is
+/// a valid manifest. Returns `false` when the person gives up on an invalid one.
+fn edit_manifest(manifest: &Path) -> Result<bool, Error> {
+    loop {
+        let editor = ["VISUAL", "EDITOR"]
+            .into_iter()
+            .find_map(|name| std::env::var(name).ok().filter(|value| !value.trim().is_empty()));
+        match editor {
+            Some(editor) => {
+                let mut words = editor.split_whitespace();
+                let program = words.next().unwrap_or_default();
+                let status = std::process::Command::new(program).args(words).arg(manifest).status();
+                if !status.is_ok_and(|status| status.success()) {
+                    eprintln!("The editor `{editor}` did not finish cleanly.");
+                }
+            }
+            None => prompt::wait_for_enter(&format!(
+                "Edit {} in your editor and save it, then press Enter…",
+                manifest.display()
+            ))?,
+        }
+        match agent::manifest::resolve(manifest) {
+            Ok(_) => return Ok(true),
+            Err(error) => {
+                let reason = match error {
+                    Error::Invalid(reason) => reason,
+                    error => error.to_string(),
+                };
+                if !prompt::confirm_lines(&[
+                    &format!("agent.yaml is not a valid manifest: {reason}"),
+                    "Edit it again?",
+                ])? {
+                    eprintln!("Fix {} and run `agentctl init` again.", manifest.display());
+                    return Ok(false);
+                }
+            }
+        }
+    }
 }
 
 /// Creates `path` with `contents`, refusing to replace a file that appeared meanwhile.
@@ -255,7 +299,7 @@ spec:
         mode: layered
     initSystem: image
     # The image clones its own repositories into {code}. To work on this checkout
-    # instead, uncomment the mount; mounts cannot change once the Agent exists.
+    # instead, uncomment the mount; mounts cannot change once the agent exists.
     # mounts:
     #   - type: bind
     #     source: .
