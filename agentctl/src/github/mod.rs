@@ -29,6 +29,8 @@ pub(crate) const ACCESS_ENVIRONMENT: &str = "GITHUB_TOKEN";
 const ACCESS_PLACEHOLDER: &str = "github_pat_AGENT_MEDIATED_GITHUB_TOKEN";
 /// The hosts `gh` and Git over HTTPS reach; the token is never substituted anywhere else.
 const MEDIATED_HOSTS: [&str; 4] = ["github.com", "api.github.com", "gist.github.com", "uploads.github.com"];
+/// Where a token that reaches every owner is used, in words.
+pub const EVERY_OTHER_ORGANIZATION: &str = "every organization without a token of its own";
 /// How long before expiry a token is reported as expiring soon.
 pub const EXPIRY_WARNING: time::Duration = time::Duration::days(7);
 /// Days a token created from [`token_form_url`] lives, unless the owner's policy allows less.
@@ -114,13 +116,20 @@ impl TokenKind {
         matches!(self, Self::FineGrained)
     }
 
+    /// What to show as the expiry when GitHub named none: tokens that cannot expire never do, and
+    /// a fine-grained token without a stated expiry is unknown.
+    #[must_use]
+    pub const fn unstated_expiry(self) -> &'static str {
+        if self.single_owner() { "unknown" } else { "never" }
+    }
+
     /// A short label for listings.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::FineGrained => "fine-grained",
             Self::Classic => "classic",
-            Self::Oauth => "oauth",
+            Self::Oauth => "OAuth",
             Self::Other => "other",
         }
     }
@@ -213,10 +222,11 @@ impl GithubToken {
             .is_some_and(|expires_at| expires_at <= now + EXPIRY_WARNING)
     }
 
-    /// `owner`, or `any other organization` for a token that reaches every owner.
+    /// `owner`, or `every organization without a token of its own` for a token that reaches every
+    /// owner.
     #[must_use]
     pub fn scope(&self) -> &str {
-        self.owner.as_deref().unwrap_or("any other organization")
+        self.owner.as_deref().unwrap_or(EVERY_OTHER_ORGANIZATION)
     }
 }
 

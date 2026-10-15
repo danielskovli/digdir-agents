@@ -12,17 +12,33 @@ pub(crate) fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && std::io::stderr().is_terminal()
 }
 
+/// Starts a question on its own line after a blank one, behind a `?` marker that is bold and cyan
+/// on a terminal unless `NO_COLOR` is set, so questions stand apart from what is reported.
+fn pose(question: &str, suffix: &str) {
+    let marker = if std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
+    {
+        "\x1b[1;36m?\x1b[0m"
+    } else {
+        "?"
+    };
+    eprint!("\n{marker} {question}{suffix}");
+    std::io::stderr().flush().ok();
+}
+
+fn read_answer() -> Result<String, Error> {
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(answer.trim().to_owned())
+}
+
 /// Asks a yes-or-no question on standard error; anything but `y` or `yes` is no.
 ///
 /// # Errors
 ///
 /// Returns an error when standard input cannot be read.
 pub(crate) fn confirm(question: &str) -> Result<bool, Error> {
-    eprint!("{question} [y/N] ");
-    std::io::stderr().flush().ok();
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+    pose(question, " [y/N] ");
+    Ok(matches!(read_answer()?.to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
 /// Asks a yes-or-no question whose answer is yes unless `n` or `no` is typed.
@@ -31,11 +47,8 @@ pub(crate) fn confirm(question: &str) -> Result<bool, Error> {
 ///
 /// Returns an error when standard input cannot be read.
 pub(crate) fn confirm_default_yes(question: &str) -> Result<bool, Error> {
-    eprint!("{question} [Y/n] ");
-    std::io::stderr().flush().ok();
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    Ok(!matches!(answer.trim().to_ascii_lowercase().as_str(), "n" | "no"))
+    pose(question, " [Y/n] ");
+    Ok(!matches!(read_answer()?.to_ascii_lowercase().as_str(), "n" | "no"))
 }
 
 /// Asks for one line of text, returned trimmed.
@@ -44,11 +57,47 @@ pub(crate) fn confirm_default_yes(question: &str) -> Result<bool, Error> {
 ///
 /// Returns an error when standard input cannot be read.
 pub(crate) fn ask(question: &str) -> Result<String, Error> {
-    eprint!("{question}: ");
-    std::io::stderr().flush().ok();
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    Ok(answer.trim().to_owned())
+    pose(question, ": ");
+    read_answer()
+}
+
+/// Asks `question` with numbered `options`, returning the chosen index. Pressing Enter picks
+/// `default`, or cancels with `None` when there is none.
+///
+/// # Errors
+///
+/// Returns an error when standard input cannot be read.
+pub(crate) fn choose(question: &str, options: &[String], default: Option<usize>) -> Result<Option<usize>, Error> {
+    pose(question, "\n");
+    for (number, option) in options.iter().enumerate() {
+        eprintln!("  {}. {option}", number + 1);
+    }
+    let hint = default.map_or_else(
+        || format!("Choose 1-{}, or press Enter to cancel: ", options.len()),
+        |default| format!("Choose 1-{} [{}]: ", options.len(), default + 1),
+    );
+    loop {
+        eprint!("{hint}");
+        std::io::stderr().flush().ok();
+        let answer = read_answer()?;
+        if answer.is_empty() {
+            return Ok(default);
+        }
+        if let Some(index) = numbered(&answer, options.len()) {
+            return Ok(Some(index));
+        }
+        eprintln!("Type a number from 1 to {}.", options.len());
+    }
+}
+
+/// The option `answer` picks among `count`, numbered from 1.
+fn numbered(answer: &str, count: usize) -> Option<usize> {
+    answer
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|number| (1..=count).contains(number))
+        .map(|number| number - 1)
 }
 
 /// Reads a secret typed or pasted on the terminal without echoing it.
@@ -57,8 +106,7 @@ pub(crate) fn ask(question: &str) -> Result<String, Error> {
 ///
 /// Returns an error when the terminal cannot be read, the user presses Ctrl-C, or nothing was entered.
 pub(crate) fn secret(label: &str) -> Result<Zeroizing<String>, Error> {
-    eprint!("{label}: ");
-    std::io::stderr().flush().ok();
+    pose(label, ": ");
     crossterm::terminal::enable_raw_mode()?;
     let read = read_secret();
     let _ = crossterm::terminal::disable_raw_mode();
@@ -92,6 +140,20 @@ fn read_secret() -> Result<Zeroizing<String>, Error> {
                 value.pop();
             }
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::numbered;
+
+    #[test]
+    fn a_choice_is_a_listed_number() {
+        assert_eq!(numbered("1", 3), Some(0));
+        assert_eq!(numbered(" 3 ", 3), Some(2));
+        for answer in ["0", "4", "digdir", "-1"] {
+            assert_eq!(numbered(answer, 3), None, "{answer:?}");
         }
     }
 }

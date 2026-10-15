@@ -25,7 +25,7 @@ pub(crate) enum Source {
 /// Gets a token from `source`, shows what GitHub says about it, and stores it once confirmed.
 ///
 /// A fine-grained token is kept for `owner`, by default the owner of the current directory's
-/// repository. Any other token reaches every owner and is kept for any other organization, unless `owner`
+/// repository. Any other token reaches every owner and is kept for every organization without one of its own, unless `owner`
 /// is named. Returns `None` when nothing was stored.
 ///
 /// # Errors
@@ -63,6 +63,8 @@ async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> Comm
         Source::HostGh => (agent::github::token_from_gh()?, None),
         Source::Browser => {
             let expected = browser_friction()?;
+            eprintln!("The GitHub CLI signs in next. What it says about its configuration and plain-text credentials");
+            eprintln!("concerns a temporary sign-in that agentctl reads and deletes right after.");
             let token = agent::github::token_from_gh_sign_in()?
                 .ok_or_else(|| Error::Invalid("`--browser` needs the GitHub CLI, `gh`, on this host".into()))?;
             (token, Some(expected))
@@ -145,13 +147,9 @@ pub(crate) async fn logout(client: &Client, target: Option<Logout>, yes: bool) -
     if !prompt::interactive() {
         return Err(Error::Invalid("no terminal to choose on; pass `--owner` or `--everywhere`".into()).into());
     }
-    eprintln!("Log out of GitHub for agents in:");
     let choices = logout_choices(&tokens);
-    for (number, (label, _)) in choices.iter().enumerate() {
-        eprintln!("  {}. {label}", number + 1);
-    }
-    let answer = prompt::ask(&format!("Choose 1-{}, or press Enter to cancel", choices.len()))?;
-    let Some(index) = choice(&answer, choices.len()) else {
+    let labels: Vec<String> = choices.iter().map(|(label, _)| label.clone()).collect();
+    let Some(index) = prompt::choose("Log out of GitHub for agents in:", &labels, None)? else {
         eprintln!("Nothing was changed.");
         return Ok(());
     };
@@ -241,10 +239,10 @@ fn logout_choices(tokens: &[GithubToken]) -> Vec<(String, Logout)> {
 
 /// A token in words: where it is used, whom it acts as, and when it expires.
 fn describe(token: &GithubToken) -> String {
-    let place = token
-        .owner
-        .as_deref()
-        .map_or_else(|| "Any other organization".to_owned(), ToOwned::to_owned);
+    let place = token.owner.as_deref().map_or_else(
+        || capitalized(agent::github::EVERY_OTHER_ORGANIZATION),
+        ToOwned::to_owned,
+    );
     format!(
         "{place}: acts as {} ({} token, expires {})",
         token.account.login,
@@ -253,14 +251,12 @@ fn describe(token: &GithubToken) -> String {
     )
 }
 
-/// The menu entry `answer` picks among `count`, numbered from 1.
-fn choice(answer: &str, count: usize) -> Option<usize> {
-    answer
-        .trim()
-        .parse::<usize>()
-        .ok()
-        .filter(|number| (1..=count).contains(number))
-        .map(|number| number - 1)
+fn capitalized(text: &str) -> String {
+    let mut characters = text.chars();
+    characters
+        .next()
+        .map(|first| first.to_uppercase().chain(characters).collect())
+        .unwrap_or_default()
 }
 
 /// Lists the stored tokens: owner, account, kind and expiry.
@@ -279,7 +275,7 @@ pub(crate) async fn list(client: &Client) -> CommandResult<()> {
     for token in tokens {
         println!(
             "{:<20} {:<24} {:<13} {}",
-            token.scope(),
+            token.owner.as_deref().unwrap_or("(all others)"),
             token.account.login,
             token.kind.label(),
             expiry(&token, now)
@@ -290,7 +286,7 @@ pub(crate) async fn list(client: &Client) -> CommandResult<()> {
 
 fn expiry(token: &GithubToken, now: time::OffsetDateTime) -> String {
     match token.expires_at {
-        None => "never, or unknown".into(),
+        None => token.kind.unstated_expiry().into(),
         Some(expires_at) if token.expired(now) => format!("{} (expired)", expires_at.date()),
         Some(expires_at) if token.expires_soon(now) => format!("{} (soon)", expires_at.date()),
         Some(expires_at) => expires_at.date().to_string(),
@@ -331,16 +327,16 @@ fn repository_from_remotes(remotes: &str) -> Option<Repository> {
 
 /// Asks whether to create a fine-grained token or sign in through the GitHub CLI's browser flow.
 fn choose_method() -> Result<Source, Error> {
-    eprintln!("How should agents sign in to GitHub?");
-    eprintln!("  1. Create a fine-grained token: only the repositories you pick (recommended)");
-    eprintln!("  2. Sign in with the browser through the GitHub CLI: every repository the account can reach");
-    loop {
-        match prompt::ask("Choose 1-2 [1]")?.as_str() {
-            "" | "1" => return Ok(Source::Form),
-            "2" => return Ok(Source::Browser),
-            _ => eprintln!("Type 1 or 2, or press Enter for 1."),
-        }
-    }
+    let options = [
+        "Create a fine-grained token: only the repositories you pick (recommended)".to_owned(),
+        "Sign in with the browser through the GitHub CLI: every repository the account can reach".to_owned(),
+    ];
+    Ok(
+        match prompt::choose("How should agents sign in to GitHub?", &options, Some(0))? {
+            Some(1) => Source::Browser,
+            _ => Source::Form,
+        },
+    )
 }
 
 /// The organization or user to set up access for: this repository's owner when the person agrees,
@@ -355,9 +351,10 @@ fn choose_owner(repository: &mut Option<Repository>) -> Result<String, Error> {
     {
         return Ok(found.owner.clone());
     }
-    eprintln!("Which GitHub organization or user should agents work in?");
+    let mut question = "Which GitHub organization or user should agents work in? Type a name or paste a repository URL";
     loop {
-        let answer = prompt::ask("Organization, user or repository URL")?;
+        let answer = prompt::ask(question)?;
+        question = "Organization, user or repository URL";
         match owner_from_answer(&answer) {
             Some((owner, named)) => {
                 if named.is_some() || repository.as_ref().is_some_and(|found| found.owner != owner) {
@@ -404,6 +401,7 @@ async fn create_in_form(owner: &str, repository: Option<&Repository>) -> Result<
         time::OffsetDateTime::now_utc().date()
     );
     let url = agent::github::token_form_url(owner, &name, &description);
+    eprintln!();
     eprintln!("Agents need a fine-grained GitHub token for {owner}.");
     eprintln!();
     eprintln!("  1. Sign in to github.com as the account agents should act as, such as a bot account.");
@@ -419,7 +417,6 @@ async fn create_in_form(owner: &str, repository: Option<&Repository>) -> Result<
     eprintln!("  4. Generate the token and copy it.");
     eprintln!();
     eprintln!("  {url}");
-    eprintln!();
     if crate::launch::launch_blocked(|name| std::env::var_os(name)).is_none()
         && prompt::confirm_default_yes("Open the form in your browser now?")?
         && let Err(error) = crate::launch::open_url(&url).await
@@ -472,7 +469,7 @@ fn warnings(inspection: &Inspection, kind: TokenKind, host_login: Option<&str>) 
     }
     if !kind.single_owner() {
         warnings.push(format!(
-            "a {} token reaches every repository {login} can, not selected ones",
+            "this {} token reaches every repository {login} can, not selected ones",
             kind.label()
         ));
     }
@@ -509,7 +506,11 @@ fn summary(inspection: &Inspection, owner: Option<&str>, warnings: &[String]) ->
         inspection.account.login, inspection.account.name, inspection.account.email
     );
     let _ = writeln!(text, "  Kind:      {}", inspection.kind.label());
-    let _ = writeln!(text, "  For:       {}", owner.unwrap_or("any other organization"));
+    let _ = writeln!(
+        text,
+        "  For:       {}",
+        owner.unwrap_or(agent::github::EVERY_OTHER_ORGANIZATION)
+    );
     if let Some((repository, visible)) = &inspection.repository {
         let _ = writeln!(
             text,
@@ -521,7 +522,7 @@ fn summary(inspection: &Inspection, owner: Option<&str>, warnings: &[String]) ->
         text,
         "  Expires:   {}",
         inspection.expires_at.map_or_else(
-            || "never, or GitHub did not say".to_owned(),
+            || inspection.kind.unstated_expiry().to_owned(),
             |expires_at| expires_at.date().to_string()
         )
     );
@@ -593,23 +594,14 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "digdir: acts as digdir-bot (fine-grained token, expires never, or unknown)",
-                "Any other organization: acts as digdir-bot (classic token, expires never, or unknown)",
+                "digdir: acts as digdir-bot (fine-grained token, expires unknown)",
+                "Every organization without a token of its own: acts as digdir-bot (classic token, expires never)",
                 "Everywhere: every token above",
             ]
         );
         assert_eq!(choices[0].1, Logout::Owner("digdir".into()));
         assert_eq!(choices[1].1, Logout::AnyOther);
         assert_eq!(choices[2].1, Logout::Everywhere);
-    }
-
-    #[test]
-    fn a_menu_choice_is_a_listed_number_and_anything_else_cancels() {
-        assert_eq!(choice("1", 3), Some(0));
-        assert_eq!(choice(" 3 ", 3), Some(2));
-        for answer in ["", "0", "4", "digdir", "-1"] {
-            assert_eq!(choice(answer, 3), None, "{answer:?}");
-        }
     }
 
     #[test]

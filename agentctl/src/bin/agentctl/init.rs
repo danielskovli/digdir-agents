@@ -82,7 +82,7 @@ enum Github {
     None,
     /// The only stored token, whichever owner it is for.
     Only,
-    /// The token for this owner, or the one for any other organization.
+    /// The token for this owner, or the one for every organization without its own.
     Owner(String),
 }
 
