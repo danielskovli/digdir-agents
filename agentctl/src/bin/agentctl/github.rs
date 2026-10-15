@@ -435,9 +435,12 @@ fn hostname_command() -> Option<String> {
 /// The friction before a browser sign-in: it yields a token that reaches every repository the
 /// account can, so the person names the account first and a different one is refused.
 fn browser_friction() -> Result<String, Error> {
-    eprintln!("The browser sign-in creates a token that reaches every repository and organization the");
-    eprintln!("account can, unlike a fine-grained token. It signs in whichever account the browser uses.");
-    let expected = prompt::ask("Type the login of the account agents should act as")?;
+    let expected = prompt::ask_lines(&[
+        "Which account should agents act as?",
+        "The browser sign-in creates a token that reaches every repository and organization the",
+        "account can, unlike a fine-grained token. It signs in whichever account the browser uses.",
+        "Login",
+    ])?;
     if expected.is_empty() {
         return Err(Error::Invalid("no account was named; nothing was signed in".into()));
     }

@@ -93,7 +93,7 @@ async fn github_account(client: &Client, status: &AuthenticationStatus) -> Githu
     let Some(repository) = crate::github::current_repository() else {
         return match status.github.as_slice() {
             [_] => Github::Only,
-            [] => offer_github_login(client).await,
+            [] => offer_github_login(client, None).await,
             _ => Github::None,
         };
     };
@@ -118,8 +118,8 @@ async fn github_account(client: &Client, status: &AuthenticationStatus) -> Githu
                 );
                 return Github::Owner(owner);
             }
-            eprintln!(
-                "GitHub: the token for {} {}.",
+            let reason = format!(
+                "The GitHub token for {} {}.",
                 check.token.scope(),
                 if visible {
                     "expires within a week"
@@ -127,19 +127,23 @@ async fn github_account(client: &Client, status: &AuthenticationStatus) -> Githu
                     "cannot see this repository"
                 }
             );
-            match offer_github_login(client).await {
+            match offer_github_login(client, Some(&reason)).await {
                 Github::None if visible => Github::Owner(owner),
                 chosen => chosen,
             }
         }
         // No token for this owner yet, which the offer below explains by itself.
-        Err(_) => offer_github_login(client).await,
+        Err(_) => offer_github_login(client, None).await,
     }
 }
 
-async fn offer_github_login(client: &Client) -> Github {
-    let question = "Should agents be able to work on GitHub, such as pushing code and opening pull requests?";
-    if !prompt::confirm(question).unwrap_or(false) {
+/// Offers setting up a GitHub token, saying first why when there is a reason beyond having none.
+async fn offer_github_login(client: &Client, reason: Option<&str>) -> Github {
+    let asked = reason.map_or_else(
+        || prompt::confirm("Should agents be able to work on GitHub, such as pushing code and opening pull requests?"),
+        |reason| prompt::confirm_lines(&[reason, "Set up a new GitHub token for agents now?"]),
+    );
+    if !asked.unwrap_or(false) {
         return Github::None;
     }
     match crate::github::login(client, crate::github::Source::Form, None).await {
@@ -154,15 +158,23 @@ async fn offer_github_login(client: &Client) -> Github {
 
 /// Offers the Claude Code login, then the Codex one, returning whether either was stored.
 async fn sign_in_to_a_harness(home: &ControlPlaneHome, client: &Client) -> CommandResult<bool> {
-    eprintln!("Agents run Claude Code or Codex, and neither is signed in on this host.");
-    for (harness, label) in [
-        (agent::Harness::ClaudeCode, "Claude Code"),
-        (agent::Harness::Codex, "Codex"),
-    ] {
-        if prompt::confirm(&format!("Sign in to {label} now?"))? {
-            crate::harness_login(home, client, harness, false).await?;
-            return Ok(true);
-        }
+    let options = [
+        "Claude Code".to_owned(),
+        "Codex".to_owned(),
+        "Neither for now".to_owned(),
+    ];
+    let harness = match prompt::choose(
+        "Neither Claude Code nor Codex is signed in on this host. Which should agents use?",
+        &options,
+        Some(0),
+    )? {
+        Some(0) => Some(agent::Harness::ClaudeCode),
+        Some(1) => Some(agent::Harness::Codex),
+        _ => None,
+    };
+    if let Some(harness) = harness {
+        crate::harness_login(home, client, harness, false).await?;
+        return Ok(true);
     }
     eprintln!("Sign in with `agentctl claude login` or `agentctl codex login`, then run `agentctl init` again.");
     Ok(false)

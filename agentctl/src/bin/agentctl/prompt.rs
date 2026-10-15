@@ -12,16 +12,23 @@ pub(crate) fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && std::io::stderr().is_terminal()
 }
 
-/// Starts a question on its own line after a blank one, behind a `?` marker that is bold and cyan
-/// on a terminal unless `NO_COLOR` is set, so questions stand apart from what is reported.
-fn pose(question: &str, suffix: &str) {
-    let marker = if std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
-    {
-        "\x1b[1;36m?\x1b[0m"
-    } else {
-        "?"
-    };
-    eprint!("\n{marker} {question}{suffix}");
+/// Starts a question after a blank line, behind a `?` marker that is bold and cyan on a terminal
+/// unless `NO_COLOR` is set, so questions stand apart from what is reported. Any further `lines`,
+/// such as what the question is about, follow indented under it, and `suffix` ends the last line.
+fn pose(lines: &[&str], suffix: &str) {
+    let colored = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
+    let marker = if colored { "\x1b[1;36m?\x1b[0m" } else { "?" };
+    let mut text = String::from("\n");
+    for (index, line) in lines.iter().enumerate() {
+        if index == 0 {
+            text.push_str(marker);
+            text.push(' ');
+        } else {
+            text.push_str("\n  ");
+        }
+        text.push_str(line);
+    }
+    eprint!("{text}{suffix}");
     std::io::stderr().flush().ok();
 }
 
@@ -37,7 +44,16 @@ fn read_answer() -> Result<String, Error> {
 ///
 /// Returns an error when standard input cannot be read.
 pub(crate) fn confirm(question: &str) -> Result<bool, Error> {
-    pose(question, " [y/N] ");
+    confirm_lines(&[question])
+}
+
+/// Like [`confirm`], for a question of several lines: what it is about first, the question last.
+///
+/// # Errors
+///
+/// Returns an error when standard input cannot be read.
+pub(crate) fn confirm_lines(lines: &[&str]) -> Result<bool, Error> {
+    pose(lines, " [y/N] ");
     Ok(matches!(read_answer()?.to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
@@ -47,7 +63,7 @@ pub(crate) fn confirm(question: &str) -> Result<bool, Error> {
 ///
 /// Returns an error when standard input cannot be read.
 pub(crate) fn confirm_default_yes(question: &str) -> Result<bool, Error> {
-    pose(question, " [Y/n] ");
+    pose(&[question], " [Y/n] ");
     Ok(!matches!(read_answer()?.to_ascii_lowercase().as_str(), "n" | "no"))
 }
 
@@ -57,7 +73,17 @@ pub(crate) fn confirm_default_yes(question: &str) -> Result<bool, Error> {
 ///
 /// Returns an error when standard input cannot be read.
 pub(crate) fn ask(question: &str) -> Result<String, Error> {
-    pose(question, ": ");
+    ask_lines(&[question])
+}
+
+/// Like [`ask`], for a question of several lines: the question first, then what it is about,
+/// and last the label of the answer.
+///
+/// # Errors
+///
+/// Returns an error when standard input cannot be read.
+pub(crate) fn ask_lines(lines: &[&str]) -> Result<String, Error> {
+    pose(lines, ": ");
     read_answer()
 }
 
@@ -68,7 +94,7 @@ pub(crate) fn ask(question: &str) -> Result<String, Error> {
 ///
 /// Returns an error when standard input cannot be read.
 pub(crate) fn choose(question: &str, options: &[String], default: Option<usize>) -> Result<Option<usize>, Error> {
-    pose(question, "\n");
+    pose(&[question], "\n");
     for (number, option) in options.iter().enumerate() {
         eprintln!("  {}. {option}", number + 1);
     }
@@ -106,7 +132,7 @@ fn numbered(answer: &str, count: usize) -> Option<usize> {
 ///
 /// Returns an error when the terminal cannot be read, the user presses Ctrl-C, or nothing was entered.
 pub(crate) fn secret(label: &str) -> Result<Zeroizing<String>, Error> {
-    pose(label, ": ");
+    pose(&[label], ": ");
     crossterm::terminal::enable_raw_mode()?;
     let read = read_secret();
     let _ = crossterm::terminal::disable_raw_mode();
