@@ -37,8 +37,10 @@ and creates the Agent through the same form as `agentctl tui`. Once the Agent is
 Before creating the agent it offers to open the written manifest in `$VISUAL` or `$EDITOR`, since the image,
 resources, mounts and access cannot change once the agent exists. `agentctl status` shows agentd, the stored logins
 and the current directory's agent at a glance, and `agentctl claude status` and `agentctl codex status` exit with 1
-when that login is missing. The written manifest starts from the published self-development image, which clones its own repositories rather
-than yours; it includes a commented-out mount of the checkout for working on it directly. Edit it like any other. `agentctl` on its own asks
+when that login is missing. The written manifest uses the published self-development image, or, if you choose a custom image, a Dockerfile it
+writes at `.agentctl/Dockerfile` that builds on that image and is built with Docker on your machine. The published
+image clones its own repositories rather than yours; the manifest includes a commented-out mount of the checkout for
+working on it directly. Edit it like any other. `agentctl` on its own asks
 whether to open the current directory's Agent in `agentctl tui`, or to set one up when there is none, and prints the
 help when you decline. `attach`, `exec` and `ssh` likewise offer `init` when they would use the current directory's
 Agent and find none. Both ask only when a person is at the terminal; scripts get the usual error.
