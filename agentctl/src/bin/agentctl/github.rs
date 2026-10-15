@@ -109,12 +109,7 @@ async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> Comm
             "Agents will push and comment as {}. Use this token?",
             inspection.account.login
         );
-        let confirmed = if warnings.is_empty() {
-            prompt::confirm_default_yes(&question)?
-        } else {
-            prompt::confirm(&question)?
-        };
-        if !confirmed {
+        if !prompt::confirm(&question)? {
             eprintln!("Nothing was stored.");
             return Ok(None);
         }
@@ -344,7 +339,7 @@ fn choose_method() -> Result<Source, Error> {
 /// repository the instructions and the access check use.
 fn choose_owner(repository: &mut Option<Repository>) -> Result<String, Error> {
     if let Some(found) = repository.as_ref()
-        && prompt::confirm_default_yes(&format!(
+        && prompt::confirm(&format!(
             "This repository is {found} on GitHub. Set up access for agents working in {}?",
             found.owner
         ))?
@@ -417,11 +412,11 @@ async fn create_in_form(owner: &str, repository: Option<&Repository>) -> Result<
     eprintln!("  4. Generate the token and copy it.");
     eprintln!();
     eprintln!("  {url}");
-    if crate::launch::launch_blocked(|name| std::env::var_os(name)).is_none()
-        && prompt::confirm_default_yes("Open the form in your browser now?")?
-        && let Err(error) = crate::launch::open_url(&url).await
-    {
-        eprintln!("Could not open the browser ({error}); open the address above instead.");
+    if crate::launch::launch_blocked(|name| std::env::var_os(name)).is_none() {
+        prompt::wait_for_enter("Press Enter to open the form in your browser…")?;
+        if let Err(error) = crate::launch::open_url(&url).await {
+            eprintln!("Could not open the browser ({error}); open the address above instead.");
+        }
     }
     prompt::secret("Paste the token")
 }

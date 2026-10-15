@@ -34,15 +34,18 @@ fn pose(lines: &[&str], suffix: &str) {
 
 fn read_answer() -> Result<String, Error> {
     let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
+    if std::io::stdin().read_line(&mut answer)? == 0 {
+        return Err(Error::Invalid("no answer: standard input ended".into()));
+    }
     Ok(answer.trim().to_owned())
 }
 
-/// Asks a yes-or-no question on standard error; anything but `y` or `yes` is no.
+/// Asks a yes-or-no question on standard error. There is no default: the answer must be `y`,
+/// `yes`, `n` or `no`, so pressing Enter by reflex accepts nothing.
 ///
 /// # Errors
 ///
-/// Returns an error when standard input cannot be read.
+/// Returns an error when standard input cannot be read or ends.
 pub(crate) fn confirm(question: &str) -> Result<bool, Error> {
     confirm_lines(&[question])
 }
@@ -51,20 +54,36 @@ pub(crate) fn confirm(question: &str) -> Result<bool, Error> {
 ///
 /// # Errors
 ///
-/// Returns an error when standard input cannot be read.
+/// Returns an error when standard input cannot be read or ends.
 pub(crate) fn confirm_lines(lines: &[&str]) -> Result<bool, Error> {
-    pose(lines, " [y/N] ");
-    Ok(matches!(read_answer()?.to_ascii_lowercase().as_str(), "y" | "yes"))
+    pose(lines, " (y/n) ");
+    loop {
+        if let Some(answer) = yes_or_no(&read_answer()?) {
+            return Ok(answer);
+        }
+        eprint!("Type y or n: ");
+        std::io::stderr().flush().ok();
+    }
 }
 
-/// Asks a yes-or-no question whose answer is yes unless `n` or `no` is typed.
+/// The answer `y`, `yes`, `n` or `no` gives, in any case; anything else is no answer.
+fn yes_or_no(answer: &str) -> Option<bool> {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Some(true),
+        "n" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+/// Shows `message` after a blank line and waits for Enter; Ctrl-C ends the command as usual.
 ///
 /// # Errors
 ///
-/// Returns an error when standard input cannot be read.
-pub(crate) fn confirm_default_yes(question: &str) -> Result<bool, Error> {
-    pose(&[question], " [Y/n] ");
-    Ok(!matches!(read_answer()?.to_ascii_lowercase().as_str(), "n" | "no"))
+/// Returns an error when standard input cannot be read or ends.
+pub(crate) fn wait_for_enter(message: &str) -> Result<(), Error> {
+    eprint!("\n{message}");
+    std::io::stderr().flush().ok();
+    read_answer().map(drop)
 }
 
 /// Asks for one line of text, returned trimmed.
@@ -172,7 +191,20 @@ fn read_secret() -> Result<Zeroizing<String>, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::numbered;
+    use super::{numbered, yes_or_no};
+
+    #[test]
+    fn yes_and_no_must_be_typed() {
+        for answer in ["y", "Y", "yes", " YES "] {
+            assert_eq!(yes_or_no(answer), Some(true), "{answer:?}");
+        }
+        for answer in ["n", "No", "no "] {
+            assert_eq!(yes_or_no(answer), Some(false), "{answer:?}");
+        }
+        for answer in ["", "  ", "yep", "1", "q"] {
+            assert_eq!(yes_or_no(answer), None, "{answer:?}");
+        }
+    }
 
     #[test]
     fn a_choice_is_a_listed_number() {

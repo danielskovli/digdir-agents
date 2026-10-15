@@ -229,7 +229,8 @@ filled in: contents, issues, pull requests, Actions and workflow files read and 
 pick the repositories, the one thing the form cannot be given, and paste the token. agentctl then asks GitHub which
 account it acts as, whether it can see the repository and when it expires, and shows that before anything is stored.
 It warns when the account is also your own `gh` login, is not named like an automation account (`…-bot`, `…-agent`),
-cannot see the repository, or expires within a week, and then asks for confirmation, defaulting to no.
+cannot see the repository, or expires within a week, and then asks for confirmation. Yes-or-no questions have no
+default: they take `y` or `n`, never a bare Enter.
 
 A fine-grained token is kept for its owner. A classic or OAuth token reaches every owner and is kept for every
 organization without a token of its own: `--from-stdin` reads any token, `--from-gh` imports the host's own `gh`
