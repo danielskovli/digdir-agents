@@ -26,7 +26,7 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResu
     }
     let directory = std::env::current_dir().map_err(Error::from)?;
     if let Ok(agent) = client.resolve_agent_variant(directory.clone(), None).await {
-        eprintln!("This directory already has Agent {}.", agent.metadata.name);
+        eprintln!("This directory already has the agent {}.", agent.metadata.name);
         return Ok(Some(agent.metadata.name));
     }
     let mut status = client.auth_status().await?;
@@ -49,7 +49,7 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResu
             ))
             .into());
         }
-        if !prompt::confirm(&format!("No Agent manifest here. Write {}?", manifest.display()))? {
+        if !prompt::confirm(&format!("No agent manifest here. Write {}?", manifest.display()))? {
             return Ok(None);
         }
         write_new(&manifest, &template(&agent_name(root), &status, &github))?;
@@ -62,7 +62,7 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResu
         return Ok(None);
     };
     crate::wait_until_converged(client, &name, std::time::Duration::from_mins(10)).await?;
-    eprintln!("Agent {name} is ready.");
+    eprintln!("The agent {name} is ready.");
     Ok(Some(name))
 }
 
@@ -93,7 +93,7 @@ async fn github_account(client: &Client, status: &AuthenticationStatus) -> Githu
     let Some(repository) = crate::github::current_repository() else {
         return match status.github.as_slice() {
             [_] => Github::Only,
-            [] => offer_github_login(client, None).await,
+            [] => offer_github_login(client).await,
             _ => Github::None,
         };
     };
@@ -113,7 +113,7 @@ async fn github_account(client: &Client, status: &AuthenticationStatus) -> Githu
                     .is_some_and(|expires_at| expires_at <= now + agent::github::EXPIRY_WARNING);
             if visible && !expiring {
                 eprintln!(
-                    "GitHub: Agents act as {} for {owner}, and can see {repository}.",
+                    "GitHub: agents act as {} in {owner}, and can see {repository}.",
                     check.inspection.account.login
                 );
                 return Github::Owner(owner);
@@ -127,27 +127,22 @@ async fn github_account(client: &Client, status: &AuthenticationStatus) -> Githu
                     "cannot see this repository"
                 }
             );
-            match offer_github_login(client, Some(owner.clone())).await {
+            match offer_github_login(client).await {
                 Github::None if visible => Github::Owner(owner),
                 chosen => chosen,
             }
         }
-        Err(error) => {
-            eprintln!("GitHub: {}", crate::inference_error(error));
-            offer_github_login(client, Some(owner)).await
-        }
+        // No token for this owner yet, which the offer below explains by itself.
+        Err(_) => offer_github_login(client).await,
     }
 }
 
-async fn offer_github_login(client: &Client, owner: Option<String>) -> Github {
-    let question = format!(
-        "Agents can act as a GitHub account, such as a bot, to push and open pull requests{}. Set up a token now?",
-        owner.as_deref().map(|owner| format!(" in {owner}")).unwrap_or_default()
-    );
-    if !prompt::confirm(&question).unwrap_or(false) {
+async fn offer_github_login(client: &Client) -> Github {
+    let question = "Should agents be able to work on GitHub, such as pushing code and opening pull requests?";
+    if !prompt::confirm(question).unwrap_or(false) {
         return Github::None;
     }
-    match crate::github::login(client, crate::github::Source::Form, owner).await {
+    match crate::github::login(client, crate::github::Source::Form, None).await {
         Ok(Some(token)) => token.owner.map_or(Github::Only, Github::Owner),
         Ok(None) => Github::None,
         Err(error) => {
@@ -210,7 +205,7 @@ fn template(name: &str, status: &AuthenticationStatus, github: &Github) -> Strin
         harnesses.push_str("    - type: codex\n      auth: mediated\n");
         if status.claude_code {
             harnesses.push_str(
-                "      # Optional, so the Agent is still created on a host without a Codex login.\n      optional: true\n",
+                "      # Optional, so the agent is still created on a host without a Codex login.\n      optional: true\n",
             );
         }
     }
@@ -228,7 +223,7 @@ fn template(name: &str, status: &AuthenticationStatus, github: &Github) -> Strin
     };
     let code = agent::sandbox::platform::WORKING_DIRECTORY;
     format!(
-        "# Created by `agentctl init`. Change it and run `agentctl apply` to update the Agent.
+        "# Created by `agentctl init`. Change it and run `agentctl apply` to update the agent.
 apiVersion: agents.platform/v1alpha1
 kind: Agent
 metadata:

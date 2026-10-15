@@ -51,7 +51,13 @@ async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> Comm
             Error::Invalid("no terminal to sign in to GitHub on; pass a token with `--from-stdin`".into()).into(),
         );
     }
-    let named_owner = owner.map(|owner| owner.to_ascii_lowercase());
+    let mut named_owner = owner.map(|owner| owner.to_ascii_lowercase());
+    // Naming an owner asks for that owner's fine-grained token; otherwise the person chooses.
+    let source = if source == Source::Form && named_owner.is_none() && agent::github::gh_installed() {
+        choose_method()?
+    } else {
+        source
+    };
     let (token, expected_login) = match source {
         Source::Stdin => (crate::read_token_from_stdin()?, None),
         Source::HostGh => (agent::github::token_from_gh()?, None),
@@ -62,13 +68,11 @@ async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> Comm
             (token, Some(expected))
         }
         Source::Form => {
-            let owner = match named_owner
-                .clone()
-                .or_else(|| repository.as_ref().map(|repository| repository.owner.clone()))
-            {
+            let owner = match named_owner.clone() {
                 Some(owner) => owner,
-                None => ask_owner()?,
+                None => choose_owner(repository.as_ref())?,
             };
+            named_owner = Some(owner.clone());
             (create_in_form(&owner, repository.as_ref()).await?, None)
         }
     };
@@ -77,7 +81,7 @@ async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> Comm
         Some(
             match named_owner.or_else(|| repository.as_ref().map(|repository| repository.owner.clone())) {
                 Some(owner) => owner,
-                None if interactive => ask_owner()?,
+                None if interactive => choose_owner(repository.as_ref())?,
                 None => {
                     return Err(Error::Invalid(
                         "a fine-grained token belongs to one owner; name it with `--owner`".into(),
@@ -141,7 +145,7 @@ pub(crate) async fn logout(client: &Client, target: Option<Logout>, yes: bool) -
     if !prompt::interactive() {
         return Err(Error::Invalid("no terminal to choose on; pass `--owner` or `--everywhere`".into()).into());
     }
-    eprintln!("Log out of GitHub for Agents in:");
+    eprintln!("Log out of GitHub for agents in:");
     let choices = logout_choices(&tokens);
     for (number, (label, _)) in choices.iter().enumerate() {
         eprintln!("  {}. {label}", number + 1);
@@ -296,7 +300,7 @@ fn expiry(token: &GithubToken, now: time::OffsetDateTime) -> String {
 /// The GitHub repository of the current directory's `origin` remote, if it is on GitHub.
 pub(crate) fn current_repository() -> Option<Repository> {
     let output = std::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
+        .args(["remote", "-v"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
@@ -304,17 +308,64 @@ pub(crate) fn current_repository() -> Option<Repository> {
     output
         .status
         .success()
-        .then(|| Repository::from_remote(&String::from_utf8_lossy(&output.stdout)))
+        .then(|| repository_from_remotes(&String::from_utf8_lossy(&output.stdout)))
         .flatten()
 }
 
-fn ask_owner() -> Result<String, Error> {
+/// The GitHub repository `git remote -v` lists: `origin` when it is on GitHub, else the first
+/// remote that is.
+fn repository_from_remotes(remotes: &str) -> Option<Repository> {
+    let mut found = remotes.lines().filter_map(|line| {
+        let mut fields = line.split_whitespace();
+        let name = fields.next()?;
+        Repository::from_remote(fields.next()?).map(|repository| (name == "origin", repository))
+    });
+    let first = found.next()?;
+    if first.0 {
+        return Some(first.1);
+    }
+    found
+        .find(|(origin, _)| *origin)
+        .map_or(Some(first.1), |(_, repository)| Some(repository))
+}
+
+/// Asks whether to create a fine-grained token or sign in through the GitHub CLI's browser flow.
+fn choose_method() -> Result<Source, Error> {
+    eprintln!("How should agents sign in to GitHub?");
+    eprintln!("  1. Create a fine-grained token: only the repositories you pick (recommended)");
+    eprintln!("  2. Sign in with the browser through the GitHub CLI: every repository the account can reach");
     loop {
-        let owner = prompt::ask("GitHub user or organization whose repositories Agents work on")?.to_ascii_lowercase();
+        match prompt::ask("Choose 1-2 [1]")?.as_str() {
+            "" | "1" => return Ok(Source::Form),
+            "2" => return Ok(Source::Browser),
+            _ => eprintln!("Type 1 or 2, or press Enter for 1."),
+        }
+    }
+}
+
+/// The organization or user to set up access for: this repository's owner when the person agrees,
+/// otherwise one they name.
+fn choose_owner(repository: Option<&Repository>) -> Result<String, Error> {
+    if let Some(repository) = repository {
+        if prompt::confirm_default_yes(&format!(
+            "This repository is {repository} on GitHub. Set up access for agents working in {}?",
+            repository.owner
+        ))? {
+            return Ok(repository.owner.clone());
+        }
+    } else {
+        eprintln!(
+            "This directory is not a checkout of a GitHub repository, so agentctl cannot tell where agents work."
+        );
+    }
+    eprintln!("Name the GitHub organization, or user, that owns the repositories agents should work on:");
+    eprintln!("the first part of a repository's address, such as digdir in github.com/digdir/digdir-agents.");
+    loop {
+        let owner = prompt::ask("Organization or user")?.to_ascii_lowercase();
         if agent::github::valid_owner(&owner) {
             return Ok(owner);
         }
-        eprintln!("{owner:?} is not a GitHub user or organization name.");
+        eprintln!("{owner:?} cannot be a GitHub organization or user; it is the part after github.com/.");
     }
 }
 
@@ -335,13 +386,13 @@ async fn create_in_form(owner: &str, repository: Option<&Repository>) -> Result<
     let url = agent::github::token_form_url(owner, &name, &description);
     eprintln!("Agents need a fine-grained GitHub token for {owner}.");
     eprintln!();
-    eprintln!("  1. Sign in to github.com as the account Agents should act as, such as a bot account.");
+    eprintln!("  1. Sign in to github.com as the account agents should act as, such as a bot account.");
     eprintln!("     A private browser window keeps it apart from your own account.");
     eprintln!("  2. Open the form below. Name, owner, lifetime and permissions are filled in.");
     eprintln!(
         "  3. Under Repository access, choose \"Only select repositories\" and pick {}.",
         repository_name.map_or_else(
-            || "the repositories Agents work on".to_owned(),
+            || "the repositories agents work on".to_owned(),
             |name| format!("{owner}/{name}")
         )
     );
@@ -369,7 +420,7 @@ fn hostname_command() -> Option<String> {
 fn browser_friction() -> Result<String, Error> {
     eprintln!("The browser sign-in creates a token that reaches every repository and organization the");
     eprintln!("account can, unlike a fine-grained token. It signs in whichever account the browser uses.");
-    let expected = prompt::ask("Type the login of the account Agents should act as")?;
+    let expected = prompt::ask("Type the login of the account agents should act as")?;
     if expected.is_empty() {
         return Err(Error::Invalid("no account was named; nothing was signed in".into()));
     }
@@ -539,6 +590,28 @@ mod tests {
         for answer in ["", "0", "4", "digdir", "-1"] {
             assert_eq!(choice(answer, 3), None, "{answer:?}");
         }
+    }
+
+    #[test]
+    fn the_repository_is_origin_on_github_else_the_first_remote_on_github() {
+        let remotes = "upstream\thttps://github.com/digdir/upstream.git (fetch)\n\
+                       upstream\thttps://github.com/digdir/upstream.git (push)\n\
+                       origin\tgit@github.com:danielskovli/fork.git (fetch)\n";
+        assert_eq!(
+            repository_from_remotes(remotes),
+            Some(Repository::new("danielskovli", "fork"))
+        );
+        let without_origin =
+            "gitlab\thttps://gitlab.com/a/b.git (fetch)\nmine\thttps://github.com/Digdir/agents (fetch)\n";
+        assert_eq!(
+            repository_from_remotes(without_origin),
+            Some(Repository::new("digdir", "agents"))
+        );
+        assert_eq!(
+            repository_from_remotes("origin\thttps://gitlab.com/a/b.git (fetch)\n"),
+            None
+        );
+        assert_eq!(repository_from_remotes(""), None);
     }
 
     #[test]

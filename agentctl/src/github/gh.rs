@@ -27,6 +27,18 @@ pub fn token_from_gh() -> Result<Zeroizing<String>, Error> {
     gh_token(std::path::Path::new(GH), None)
 }
 
+/// Whether the GitHub CLI is installed on this host.
+#[must_use]
+pub fn gh_installed() -> bool {
+    std::process::Command::new(GH)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// The login of the host's own `gh` account, when the GitHub CLI is installed and signed in.
 #[must_use]
 pub fn host_login() -> Option<String> {

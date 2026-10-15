@@ -60,7 +60,7 @@ enum Command {
         #[command(subcommand)]
         command: CodexCommand,
     },
-    /// Manage the GitHub account Agents act as.
+    /// Manage the GitHub tokens agents act as.
     Github {
         #[command(subcommand)]
         command: GithubCommand,
@@ -313,7 +313,7 @@ enum Command {
         #[arg(short = 'o', long, default_value = "table", value_enum)]
         output: OutputFormat,
     },
-    /// Set up an Agent for the current directory, signing in and writing a manifest as needed.
+    /// Set up an agent for the current directory, signing in and writing a manifest as needed.
     Init,
     /// Open the interactive terminal UI.
     Tui,
@@ -470,12 +470,12 @@ enum CodexCommand {
 
 #[derive(Subcommand)]
 enum GithubCommand {
-    /// Store a GitHub token for Agents, separate from any `gh` login on this host.
+    /// Store a GitHub token for agents, separate from any `gh` login on this host.
     ///
     /// By default it walks you through creating a fine-grained token in GitHub's pre-filled
     /// form, for the owner of the current directory's repository. The token is checked and
     /// summarized before anything is stored. Agents whose manifest lists
-    /// `accounts: [{type: github, owner: …}]` act as the owner's token: they see an inert
+    /// `accounts: [{type: github, owner: …}]` use the owner's token: they see an inert
     /// `GITHUB_TOKEN` that only requests to GitHub receive, and commit as its account.
     Login {
         /// The user or organization the token is for; by default the owner of the current
@@ -579,14 +579,14 @@ async fn without_command(home: &ControlPlaneHome, client: &Client) -> CommandRes
     let directory = std::env::current_dir().map_err(Error::from)?;
     match client.resolve_agent_variant(directory, None).await {
         Ok(agent) => {
-            if prompt::confirm(&format!("Open Agent {} in agentctl tui?", agent.metadata.name))? {
+            if prompt::confirm(&format!("Open the agent {} in agentctl tui?", agent.metadata.name))? {
                 return tui::run(home, client).await;
             }
         }
         Err(Error::Rpc(error)) if error.is_not_found() => {
-            if prompt::confirm("No Agent was applied from this directory. Set one up now?")? {
+            if prompt::confirm("No agent was set up for this directory. Set one up now?")? {
                 if let Some(name) = Box::pin(init::run(home, client)).await?
-                    && prompt::confirm(&format!("Open a Session on {name} now?"))?
+                    && prompt::confirm(&format!("Open a session on {name} now?"))?
                 {
                     attach_new_session(home, client, &name).await?;
                 }
@@ -614,7 +614,7 @@ async fn offer_init_if_missing(
     let directory = std::env::current_dir().map_err(Error::from)?;
     if let Err(Error::Rpc(error)) = client.resolve_agent_variant(directory, None).await
         && error.is_not_found()
-        && prompt::confirm("No Agent was applied from this directory. Set one up now?")?
+        && prompt::confirm("No agent was set up for this directory. Set one up now?")?
     {
         return Box::pin(init::run(home, client)).await;
     }
@@ -672,7 +672,7 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
         } => github::reset(client, yes).await?,
         Command::Init => {
             if let Some(name) = Box::pin(init::run(home, client)).await?
-                && prompt::confirm(&format!("Open a Session on {name} now?"))?
+                && prompt::confirm(&format!("Open a session on {name} now?"))?
             {
                 attach_new_session(home, client, &name).await?;
             }

@@ -13,7 +13,7 @@ mod inspect;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-pub use gh::{host_login, token_from_gh, token_from_gh_sign_in};
+pub use gh::{gh_installed, host_login, token_from_gh, token_from_gh_sign_in};
 pub use inspect::{Inspection, SCOPES, inspect};
 
 use crate::{Error, harness::MediatedSecret, persistence};
@@ -406,7 +406,7 @@ async fn select(
             [token] => token,
             [] => {
                 return Err(Error::Invalid(
-                    "the Agent uses a GitHub account, but no token is stored; run `agentctl github login`".into(),
+                    "the agent uses a GitHub account, but no token is stored; run `agentctl github login`".into(),
                 ));
             }
             _ => {
