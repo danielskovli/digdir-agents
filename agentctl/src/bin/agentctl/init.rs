@@ -204,6 +204,7 @@ mod tests {
                 login: "digdir-bot".into(),
                 name: "Digdir Bot".into(),
                 email: "bot@example.com".into(),
+                missing_scopes: Vec::new(),
             }),
         }
     }

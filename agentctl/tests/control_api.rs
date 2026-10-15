@@ -145,6 +145,7 @@ impl AuthenticationApi for FakeAuthentication {
                 login: token.trim_start_matches("ghp_").into(),
                 name: "Bot".into(),
                 email: "bot@example.com".into(),
+                missing_scopes: Vec::new(),
             })
         })
     }

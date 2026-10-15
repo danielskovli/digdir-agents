@@ -469,12 +469,14 @@ enum CodexCommand {
 
 #[derive(Subcommand)]
 enum GithubCommand {
-    /// Store a GitHub token for Agents, separate from any `gh` login on this host.
+    /// Sign in to GitHub for Agents, separately from any `gh` login on this host.
     ///
-    /// Agents whose manifest lists `accounts: [{type: github}]` act as this account: they see an
-    /// inert `GITHUB_TOKEN` that only requests to GitHub receive, and commit as the account.
+    /// Runs the GitHub CLI's own browser sign-in in a throwaway configuration, so your `gh` login
+    /// is untouched, and asks for a pasted token when the GitHub CLI is not installed. Agents
+    /// whose manifest lists `accounts: [{type: github}]` act as this account: they see an inert
+    /// `GITHUB_TOKEN` that only requests to GitHub receive, and commit as the account.
     Login {
-        /// Read the token from standard input instead of asking for it.
+        /// Read the token from standard input instead of signing in.
         #[arg(long, conflicts_with = "from_gh")]
         from_stdin: bool,
         /// Use the token of the host's active `gh` login, which is often your own account.
@@ -1771,14 +1773,40 @@ async fn github_login(client: &Client, from_stdin: bool, from_gh: bool) -> Comma
     } else if from_gh {
         agent::github::token_from_gh()?
     } else {
-        ask_for_github_token()?
+        sign_in_to_github()?
     };
     let account = client.github_login(token.to_string()).await?;
     println!(
         "Agents with the GitHub account now act as {} and commit as {} <{}>",
         account.login, account.name, account.email
     );
+    if !account.missing_scopes.is_empty() {
+        eprintln!(
+            "Warning: the token lacks {}, so some `gh` and Git commands in Agents will fail; \
+             sign in again, or grant {}.",
+            account.missing_scopes.join(", "),
+            agent::github::SCOPES.join(", ")
+        );
+    }
     Ok(account)
+}
+
+/// Signs in through the GitHub CLI's browser flow, or asks for a token without it.
+fn sign_in_to_github() -> Result<zeroize::Zeroizing<String>, Error> {
+    if !prompt::interactive() {
+        return Err(Error::Invalid(
+            "no terminal to sign in to GitHub on; pass a token with `--from-stdin`".into(),
+        ));
+    }
+    eprintln!("Agents get their own GitHub sign-in, separate from your `gh` login, so it can be another account.");
+    eprintln!(
+        "Approve it in a browser signed in as the account Agents should act as, such as a private window for a bot."
+    );
+    if let Some(token) = agent::github::token_from_gh_sign_in()? {
+        return Ok(token);
+    }
+    eprintln!("The GitHub CLI is not installed, so paste a token instead.");
+    ask_for_github_token()
 }
 
 /// Attaches to a new Session with the first free name, `s1`, `s2` and so on.
@@ -1813,8 +1841,10 @@ fn ask_for_github_token() -> Result<zeroize::Zeroizing<String>, Error> {
             "no terminal to ask for a GitHub token on; pass it with `--from-stdin`".into(),
         ));
     }
-    eprintln!("Agents use this token instead of your `gh` login, so it can belong to a separate account.");
-    eprintln!("Create one at https://github.com/settings/tokens while signed in as that account.");
+    eprintln!(
+        "Create one at https://github.com/settings/tokens while signed in as that account; a classic token needs {}.",
+        agent::github::SCOPES.join(", ")
+    );
     prompt::secret("GitHub token")
 }
 

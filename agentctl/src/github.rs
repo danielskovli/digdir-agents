@@ -21,6 +21,11 @@ const ACCESS_PLACEHOLDER: &str = "github_pat_AGENT_MEDIATED_GITHUB_TOKEN";
 /// The hosts `gh` and Git over HTTPS reach; the token is never substituted anywhere else.
 const MEDIATED_HOSTS: [&str; 4] = ["github.com", "api.github.com", "gist.github.com", "uploads.github.com"];
 const USER_URL: &str = "https://api.github.com/user";
+/// Scopes an Agent's `gh` and Git need so common commands do not fail half-way: the GitHub CLI's
+/// own defaults, workflow files, Projects that `gh pr edit` reads, and container packages.
+pub const SCOPES: [&str; 6] = ["repo", "read:org", "gist", "workflow", "read:project", "write:packages"];
+/// The part of [`SCOPES`] the GitHub CLI does not request by default.
+const ADDITIONAL_SCOPES: &str = "workflow,read:project,write:packages";
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The GitHub account Agents act as, without its token.
@@ -33,6 +38,10 @@ pub struct GithubAccount {
     pub name: String,
     /// Email used for Git commits: the public profile email, or the account's noreply address.
     pub email: String,
+    /// Recommended [`SCOPES`] a classic or OAuth token was not granted, as GitHub reported at
+    /// login. Fine-grained tokens report no scopes and are not checked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_scopes: Vec<String>,
 }
 
 /// Validates and stores the agent stack's GitHub token.
@@ -102,11 +111,17 @@ impl Authentication {
                 "GitHub answered {status} when asked which account the token belongs to"
             )));
         }
+        let missing_scopes = response
+            .headers()
+            .get("x-oauth-scopes")
+            .and_then(|granted| granted.to_str().ok())
+            .map(missing_scopes)
+            .unwrap_or_default();
         let user: User = response
             .json()
             .await
             .map_err(|error| Error::Invalid(format!("GitHub returned an unexpected user profile: {error}")))?;
-        Ok(user.into_account())
+        Ok(user.into_account(missing_scopes))
     }
 
     #[cfg(test)]
@@ -127,7 +142,7 @@ struct User {
 }
 
 impl User {
-    fn into_account(self) -> GithubAccount {
+    fn into_account(self, missing_scopes: Vec<String>) -> GithubAccount {
         let name = self
             .name
             .filter(|name| !name.trim().is_empty())
@@ -140,8 +155,34 @@ impl User {
             login: self.login,
             name,
             email,
+            missing_scopes,
         }
     }
+}
+
+/// The recommended [`SCOPES`] that `granted`, GitHub's comma-separated `X-OAuth-Scopes`, lacks.
+/// A broader scope covers its narrower forms: `project` covers `read:project`, and `admin:org`
+/// or `write:org` cover `read:org`.
+fn missing_scopes(granted: &str) -> Vec<String> {
+    let granted: Vec<&str> = granted
+        .split(',')
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .collect();
+    SCOPES
+        .iter()
+        .filter(|required| {
+            !granted.iter().any(|scope| {
+                scope == *required
+                    || required.strip_prefix("read:").is_some_and(|resource| {
+                        *scope == resource
+                            || *scope == format!("write:{resource}")
+                            || *scope == format!("admin:{resource}")
+                    })
+            })
+        })
+        .map(|scope| (*scope).to_owned())
+        .collect()
 }
 
 /// Returns the stored GitHub account, if one has signed in.
@@ -185,22 +226,97 @@ pub(crate) fn conflicts_with_managed_secret(name: &str, placeholder: Option<&str
         })
 }
 
+/// The GitHub CLI, which owns the browser sign-in so agentctl needs no OAuth app of its own.
+const GH: &str = "gh";
+/// Environment that would make `gh` use another token than the one its configuration holds.
+const GH_TOKEN_ENVIRONMENT: [&str; 5] = [
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "GH_HOST",
+];
+
 /// Reads the token of the host's active `gh` login, for an explicit `--from-gh` import.
 ///
 /// # Errors
 ///
 /// Returns an error when `gh` is missing, has no login, or prints no token.
 pub fn token_from_gh() -> Result<Zeroizing<String>, Error> {
-    let output = std::process::Command::new("gh")
-        .args(["auth", "token"])
+    gh_token(std::path::Path::new(GH), None)
+}
+
+/// Signs in through the GitHub CLI's own browser flow and returns the new token, or `None` when
+/// the GitHub CLI is not installed.
+///
+/// `gh` runs against a throwaway configuration directory and without any token in its
+/// environment, so the host's own `gh` login is neither used nor changed, and the directory
+/// holding the new token is deleted once it has been read.
+///
+/// # Errors
+///
+/// Returns an error when the sign-in does not complete or yields no token.
+pub fn token_from_gh_sign_in() -> Result<Option<Zeroizing<String>>, Error> {
+    sign_in_with(std::path::Path::new(GH))
+}
+
+fn sign_in_with(program: &std::path::Path) -> Result<Option<Zeroizing<String>>, Error> {
+    let configuration = tempfile::TempDir::new()?;
+    let mut login = std::process::Command::new(program);
+    login.args([
+        "auth",
+        "login",
+        "--hostname",
+        "github.com",
+        "--web",
+        // With `https`, gh offers to configure Git's credential helper, which would point the
+        // host's Git at this throwaway login. The protocol choice itself is discarded with it.
+        "--git-protocol",
+        "ssh",
+        "--skip-ssh-key",
+        // Plain text in the throwaway directory, never the host's credential store.
+        "--insecure-storage",
+        "--scopes",
+        ADDITIONAL_SCOPES,
+    ]);
+    isolate(&mut login, configuration.path());
+    let status = match login.status() {
+        Ok(status) => status,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(Error::Invalid(format!("could not run `gh auth login`: {error}")));
+        }
+    };
+    if !status.success() {
+        return Err(Error::Invalid("the GitHub CLI sign-in did not complete".into()));
+    }
+    gh_token(program, Some(configuration.path())).map(Some)
+}
+
+fn isolate(command: &mut std::process::Command, configuration: &std::path::Path) {
+    command.env("GH_CONFIG_DIR", configuration);
+    // Whatever gh would write to the global Git configuration stays in the throwaway directory.
+    command.env("GIT_CONFIG_GLOBAL", configuration.join("gitconfig"));
+    for name in GH_TOKEN_ENVIRONMENT {
+        command.env_remove(name);
+    }
+}
+
+/// Runs `gh auth token`, against `configuration` when given and the host's own login otherwise.
+fn gh_token(program: &std::path::Path, configuration: Option<&std::path::Path>) -> Result<Zeroizing<String>, Error> {
+    let mut command = std::process::Command::new(program);
+    command
+        .args(["auth", "token", "--hostname", "github.com"])
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .output()
-        .map_err(|error| {
-            Error::Invalid(format!(
-                "could not run `gh auth token` (is the GitHub CLI installed?): {error}"
-            ))
-        })?;
+        .stderr(std::process::Stdio::inherit());
+    if let Some(configuration) = configuration {
+        isolate(&mut command, configuration);
+    }
+    let output = command.output().map_err(|error| {
+        Error::Invalid(format!(
+            "could not run `gh auth token` (is the GitHub CLI installed?): {error}"
+        ))
+    })?;
     if !output.status.success() {
         return Err(Error::Invalid(
             "`gh auth token` failed; run `gh auth login` first".into(),
@@ -225,6 +341,15 @@ mod tests {
 
     /// Answers one request with `status` and `body`, returning the endpoint and the request text.
     async fn serve_once(status: &'static str, body: &'static str) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        serve_once_with(status, "", body).await
+    }
+
+    /// Like [`serve_once`], adding `headers`, each ending in CRLF.
+    async fn serve_once_with(
+        status: &'static str,
+        headers: &'static str,
+        body: &'static str,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind user endpoint");
@@ -238,7 +363,7 @@ mod tests {
             stream
                 .write_all(
                     format!(
-                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     )
                     .as_bytes(),
@@ -251,6 +376,90 @@ mod tests {
 
     fn database(directory: &TempDir) -> persistence::Database {
         persistence::Database::open(&directory.path().join("agent.db")).expect("database")
+    }
+
+    /// A stand-in `gh` that records how it was run beside itself and keeps its token in
+    /// `GH_CONFIG_DIR`, as the real one does with `--insecure-storage`.
+    #[cfg(unix)]
+    fn fake_gh(directory: &TempDir, login_exit: i32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let program = directory.path().join("gh");
+        let log = directory.path().join("log");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\n\
+                 echo \"$1 $2 config=$GH_CONFIG_DIR git=$GIT_CONFIG_GLOBAL args=$*\" >> '{log}'\n\
+                 case \"$1 $2\" in\n\
+                 'auth login') [ {login_exit} -eq 0 ] || exit {login_exit}; echo gho_isolated > \"$GH_CONFIG_DIR/token\" ;;\n\
+                 'auth token') cat \"$GH_CONFIG_DIR/token\" ;;\n\
+                 esac\n",
+                log = log.display()
+            ),
+        )
+        .expect("fake gh");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("executable");
+        program
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_gh_sign_in_runs_in_a_throwaway_configuration_that_is_deleted_afterwards() {
+        let directory = TempDir::new().expect("temporary directory");
+        let program = fake_gh(&directory, 0);
+
+        let token = sign_in_with(&program).expect("sign-in").expect("gh is installed");
+
+        assert_eq!(token.as_str(), "gho_isolated");
+        let log = std::fs::read_to_string(directory.path().join("log")).expect("log");
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 2, "{log}");
+        assert!(lines[0].starts_with("auth login "), "{log}");
+        for flag in [
+            "--web",
+            "--git-protocol ssh",
+            "--skip-ssh-key",
+            "--insecure-storage",
+            "--scopes workflow,read:project,write:packages",
+            "--hostname github.com",
+        ] {
+            assert!(lines[0].contains(flag), "{flag} in {log}");
+        }
+        assert!(lines[1].starts_with("auth token "), "{log}");
+        let configuration = lines[0]
+            .split("config=")
+            .nth(1)
+            .and_then(|rest| rest.split(" git=").next())
+            .expect("configuration directory");
+        assert!(
+            lines[1].contains(&format!("config={configuration} ")),
+            "both runs share it: {log}"
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.contains(&format!("git={configuration}/gitconfig "))),
+            "gh cannot write the host's Git configuration: {log}"
+        );
+        assert!(
+            !std::path::Path::new(configuration).exists(),
+            "the token's directory is deleted"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_gh_falls_back_and_an_abandoned_sign_in_is_an_error() {
+        let directory = TempDir::new().expect("temporary directory");
+        assert!(
+            sign_in_with(&directory.path().join("missing"))
+                .expect("a missing gh is not an error")
+                .is_none()
+        );
+
+        let program = fake_gh(&directory, 1);
+        sign_in_with(&program).expect_err("an abandoned sign-in");
     }
 
     #[tokio::test(flavor = "local")]
@@ -275,6 +484,7 @@ mod tests {
                 login: "digdir-bot".into(),
                 name: "Digdir Bot".into(),
                 email: "bot@example.com".into(),
+                missing_scopes: Vec::new(),
             }
         );
         let request = request.await.expect("request");
@@ -302,6 +512,33 @@ mod tests {
 
         assert_eq!(account.name, "digdir-bot");
         assert_eq!(account.email, "42+digdir-bot@users.noreply.github.com");
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn a_token_without_the_recommended_scopes_is_stored_with_what_it_lacks() {
+        let directory = TempDir::new().expect("temporary directory");
+        let (endpoint, _request) = serve_once_with(
+            "200 OK",
+            "X-OAuth-Scopes: repo, gist, admin:org, project\r\n",
+            r#"{"login":"digdir-bot","id":42}"#,
+        )
+        .await;
+
+        let account = Authentication::new(database(&directory))
+            .with_user_url(endpoint)
+            .login(Zeroizing::new("ghp_narrow".into()))
+            .await
+            .expect("a narrow token is still stored");
+
+        assert_eq!(account.missing_scopes, ["workflow", "write:packages"]);
+    }
+
+    #[test]
+    fn broader_scopes_cover_their_read_forms() {
+        assert!(missing_scopes("repo,read:org,gist,workflow,read:project,write:packages").is_empty());
+        assert!(missing_scopes("repo, write:org, gist, workflow, project, write:packages").is_empty());
+        assert_eq!(missing_scopes(""), SCOPES);
+        assert_eq!(missing_scopes("public_repo"), SCOPES);
     }
 
     #[tokio::test(flavor = "local")]
