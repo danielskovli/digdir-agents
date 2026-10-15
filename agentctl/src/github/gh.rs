@@ -86,17 +86,77 @@ fn sign_in_with(program: &std::path::Path) -> Result<Option<Zeroizing<String>>, 
         ADDITIONAL_SCOPES,
     ]);
     isolate(&mut login, configuration.path());
-    let status = match login.status() {
-        Ok(status) => status,
+    login.stderr(std::process::Stdio::piped());
+    let mut child = match login.spawn() {
+        Ok(child) => child,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(Error::Invalid(format!("could not run `gh auth login`: {error}")));
         }
     };
+    let held = child.stderr.take().map(|mut output| {
+        std::thread::spawn(move || {
+            let mut relay = Relay::default();
+            let mut chunk = [0_u8; 4_096];
+            while let Ok(read) = std::io::Read::read(&mut output, &mut chunk) {
+                if read == 0 {
+                    break;
+                }
+                let shown = relay.feed(&chunk[..read]);
+                let mut terminal = std::io::stderr();
+                let _ = std::io::Write::write_all(&mut terminal, &shown);
+                let _ = std::io::Write::flush(&mut terminal);
+            }
+            relay.held
+        })
+    });
+    let status = child.wait()?;
+    let held = held.and_then(|relay| relay.join().ok()).unwrap_or_default();
     if !status.success() {
+        // What gh said after signing in is shown after all, as it may explain the failure.
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), &held);
         return Err(Error::Invalid("the GitHub CLI sign-in did not complete".into()));
     }
     gh_token(program, Some(configuration.path())).map(Some)
+}
+
+/// Passes on what `gh auth login` writes until the browser approved the sign-in: the one-time
+/// code, the prompt to open the browser and the confirmation. What follows only concerns the
+/// throwaway configuration, so it is held back and shown only if the sign-in fails.
+#[derive(Default)]
+struct Relay {
+    shown: Vec<u8>,
+    complete: bool,
+    held: Vec<u8>,
+}
+
+impl Relay {
+    const COMPLETE: &'static [u8] = b"Authentication complete";
+
+    /// Takes the next output of `gh`, returning the part to show now.
+    fn feed(&mut self, chunk: &[u8]) -> Vec<u8> {
+        if self.complete {
+            self.held.extend_from_slice(chunk);
+            return Vec::new();
+        }
+        let start = self.shown.len();
+        self.shown.extend_from_slice(chunk);
+        let Some(found) = self
+            .shown
+            .windows(Self::COMPLETE.len())
+            .position(|window| window == Self::COMPLETE)
+        else {
+            return chunk.to_vec();
+        };
+        self.complete = true;
+        let line_end = self.shown[found..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(self.shown.len(), |offset| found + offset + 1);
+        let shown = self.shown[start.min(line_end)..line_end].to_vec();
+        self.held.extend_from_slice(&self.shown[line_end..]);
+        shown
+    }
 }
 
 fn isolate(command: &mut std::process::Command, configuration: &std::path::Path) {
@@ -209,6 +269,28 @@ mod tests {
             !std::path::Path::new(configuration).exists(),
             "the token's directory is deleted"
         );
+    }
+
+    #[test]
+    fn only_the_code_prompt_and_confirmation_of_a_sign_in_are_shown() {
+        let mut relay = Relay::default();
+        let mut shown = Vec::new();
+        for chunk in [
+            &b"! First copy your one-time code: AB12-CD34\nPress Enter to open https://github.com/login/device..."[..],
+            b" \n\xe2\x9c\x93 Authentic",
+            b"ation complete.\n- gh config set -h github.com git_protocol ssh\n",
+            b"\xe2\x9c\x93 Configured git protocol\n! Authentication credentials saved in plain text\n",
+            b"\xe2\x9c\x93 Logged in as digdir-bot\n",
+        ] {
+            shown.extend(relay.feed(chunk));
+        }
+        let shown = String::from_utf8(shown).expect("UTF-8");
+        assert!(shown.contains("one-time code: AB12-CD34"), "{shown}");
+        assert!(shown.contains("Press Enter to open"), "{shown}");
+        assert!(shown.ends_with("Authentication complete.\n"), "{shown}");
+        let held = String::from_utf8(relay.held).expect("UTF-8");
+        assert!(held.starts_with("- gh config set"), "{held}");
+        assert!(held.contains("plain text") && held.contains("Logged in as"), "{held}");
     }
 
     #[test]

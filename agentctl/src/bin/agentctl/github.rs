@@ -43,14 +43,36 @@ pub(crate) async fn login(
     })
 }
 
+/// One sign-in attempt's outcome.
+enum Attempt {
+    Stored(GithubToken),
+    /// The person turned the token down, GitHub rejected it, or the browser signed in as another
+    /// account.
+    Declined,
+}
+
 async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> CommandResult<Option<GithubToken>> {
-    let mut repository = current_repository();
-    let interactive = source != Source::Stdin;
-    if interactive && !prompt::interactive() {
+    if source != Source::Stdin && !prompt::interactive() {
         return Err(
             Error::Invalid("no terminal to sign in to GitHub on; pass a token with `--from-stdin`".into()).into(),
         );
     }
+    // Another attempt can only differ where the person creates or approves a new token.
+    let retryable = matches!(source, Source::Form | Source::Browser);
+    loop {
+        if let Attempt::Stored(token) = attempt(client, source, owner.clone()).await? {
+            return Ok(Some(token));
+        }
+        if !retryable || !prompt::confirm("Sign in again?")? {
+            eprintln!("Nothing was stored.");
+            return Ok(None);
+        }
+    }
+}
+
+async fn attempt(client: &Client, source: Source, owner: Option<String>) -> CommandResult<Attempt> {
+    let mut repository = current_repository();
+    let interactive = source != Source::Stdin;
     let mut named_owner = owner.map(|owner| owner.to_ascii_lowercase());
     // Naming an owner asks for that owner's fine-grained token; otherwise the person chooses.
     let source = if source == Source::Form && named_owner.is_none() && agent::github::gh_installed() {
@@ -99,9 +121,20 @@ async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> Comm
     let checked = repository
         .as_ref()
         .filter(|repository| owner.as_deref().is_none_or(|owner| owner == repository.owner));
-    let inspection = agent::github::inspect(&token, checked).await?;
-    if let Some(expected) = expected_login {
-        signed_in_as(&expected, &inspection.account.login)?;
+    let inspection = match agent::github::inspect(&token, checked).await {
+        Ok(inspection) => inspection,
+        // A mistyped or incomplete paste is the likeliest cause, which another attempt can fix.
+        Err(Error::Invalid(reason)) if interactive => {
+            eprintln!("\n{reason}.");
+            return Ok(Attempt::Declined);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(expected) = expected_login
+        && let Err(refused) = signed_in_as(&expected, &inspection.account.login)
+    {
+        eprintln!("\n{refused}");
+        return Ok(Attempt::Declined);
     }
     let warnings = warnings(&inspection, kind, agent::github::host_login().as_deref());
     eprint!("{}", summary(&inspection, owner.as_deref(), &warnings));
@@ -111,8 +144,7 @@ async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> Comm
             inspection.account.login
         );
         if !prompt::confirm(&question)? {
-            eprintln!("Nothing was stored.");
-            return Ok(None);
+            return Ok(Attempt::Declined);
         }
     }
     let stored = client.github_login(token.to_string(), owner).await?;
@@ -123,7 +155,7 @@ async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> Comm
         stored.account.name,
         stored.account.email
     );
-    Ok(Some(stored))
+    Ok(Attempt::Stored(stored))
 }
 
 /// Forgets a stored token: the one `target` names, or one chosen from a menu.
@@ -449,7 +481,7 @@ fn signed_in_as(expected: &str, actual: &str) -> Result<(), Error> {
         Ok(())
     } else {
         Err(Error::Invalid(format!(
-            "the browser signed in as {actual}, not {expected}; nothing was stored. Sign in as {expected} and try again"
+            "The browser signed in as {actual}, not {expected}, so this token is not used."
         )))
     }
 }
@@ -528,7 +560,6 @@ fn summary(inspection: &Inspection, owner: Option<&str>, warnings: &[String]) ->
     for warning in warnings {
         let _ = writeln!(text, "  ⚠ {warning}");
     }
-    let _ = writeln!(text);
     text
 }
 
