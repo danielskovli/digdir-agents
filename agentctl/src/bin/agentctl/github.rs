@@ -63,8 +63,9 @@ async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> Comm
         Source::HostGh => (agent::github::token_from_gh()?, None),
         Source::Browser => {
             let expected = browser_friction()?;
-            eprintln!("The GitHub CLI signs in next. What it says about its configuration and plain-text credentials");
-            eprintln!("concerns a temporary sign-in that agentctl reads and deletes right after.");
+            eprintln!();
+            eprintln!("The GitHub CLI signs in next. Its notes about configuration and plain-text credentials");
+            eprintln!("refer to a temporary sign-in that agentctl deletes right after.");
             let token = agent::github::token_from_gh_sign_in()?
                 .ok_or_else(|| Error::Invalid("`--browser` needs the GitHub CLI, `gh`, on this host".into()))?;
             (token, Some(expected))
@@ -431,10 +432,10 @@ fn hostname_command() -> Option<String> {
 /// account can, so the person names the account first and a different one is refused.
 fn browser_friction() -> Result<String, Error> {
     let expected = prompt::ask_lines(&[
-        "Which account should agents act as?",
-        "The browser sign-in creates a token that reaches every repository and organization the",
-        "account can, unlike a fine-grained token. It signs in whichever account the browser uses.",
-        "Login",
+        "Which GitHub account should agents act as?",
+        "Sign in to github.com as that account in your browser first. If the browser approves",
+        "a different account, agentctl refuses it.",
+        "Account name",
     ])?;
     if expected.is_empty() {
         return Err(Error::Invalid("no account was named; nothing was signed in".into()));
