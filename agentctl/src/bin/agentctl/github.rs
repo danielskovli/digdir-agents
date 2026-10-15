@@ -44,7 +44,7 @@ pub(crate) async fn login(
 }
 
 async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> CommandResult<Option<GithubToken>> {
-    let repository = current_repository();
+    let mut repository = current_repository();
     let interactive = source != Source::Stdin;
     if interactive && !prompt::interactive() {
         return Err(
@@ -70,7 +70,7 @@ async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> Comm
         Source::Form => {
             let owner = match named_owner.clone() {
                 Some(owner) => owner,
-                None => choose_owner(repository.as_ref())?,
+                None => choose_owner(&mut repository)?,
             };
             named_owner = Some(owner.clone());
             (create_in_form(&owner, repository.as_ref()).await?, None)
@@ -81,7 +81,7 @@ async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> Comm
         Some(
             match named_owner.or_else(|| repository.as_ref().map(|repository| repository.owner.clone())) {
                 Some(owner) => owner,
-                None if interactive => choose_owner(repository.as_ref())?,
+                None if interactive => choose_owner(&mut repository)?,
                 None => {
                     return Err(Error::Invalid(
                         "a fine-grained token belongs to one owner; name it with `--owner`".into(),
@@ -344,29 +344,49 @@ fn choose_method() -> Result<Source, Error> {
 }
 
 /// The organization or user to set up access for: this repository's owner when the person agrees,
-/// otherwise one they name.
-fn choose_owner(repository: Option<&Repository>) -> Result<String, Error> {
-    if let Some(repository) = repository {
-        if prompt::confirm_default_yes(&format!(
-            "This repository is {repository} on GitHub. Set up access for agents working in {}?",
-            repository.owner
-        ))? {
-            return Ok(repository.owner.clone());
-        }
-    } else {
-        eprintln!(
-            "This directory is not a checkout of a GitHub repository, so agentctl cannot tell where agents work."
-        );
+/// otherwise one they name or paste a GitHub address of. A pasted repository address becomes the
+/// repository the instructions and the access check use.
+fn choose_owner(repository: &mut Option<Repository>) -> Result<String, Error> {
+    if let Some(found) = repository.as_ref()
+        && prompt::confirm_default_yes(&format!(
+            "This repository is {found} on GitHub. Set up access for agents working in {}?",
+            found.owner
+        ))?
+    {
+        return Ok(found.owner.clone());
     }
-    eprintln!("Name the GitHub organization, or user, that owns the repositories agents should work on:");
-    eprintln!("the first part of a repository's address, such as digdir in github.com/digdir/digdir-agents.");
+    eprintln!("Which GitHub organization or user should agents work in?");
     loop {
-        let owner = prompt::ask("Organization or user")?.to_ascii_lowercase();
-        if agent::github::valid_owner(&owner) {
-            return Ok(owner);
+        let answer = prompt::ask("Organization, user or repository URL")?;
+        match owner_from_answer(&answer) {
+            Some((owner, named)) => {
+                if named.is_some() || repository.as_ref().is_some_and(|found| found.owner != owner) {
+                    *repository = named;
+                }
+                return Ok(owner);
+            }
+            None => eprintln!(
+                "Type a name such as digdir, or paste an address such as https://github.com/digdir/digdir-agents."
+            ),
         }
-        eprintln!("{owner:?} cannot be a GitHub organization or user; it is the part after github.com/.");
     }
+}
+
+/// The owner, and the repository when there is one, that an answer names: a plain name, or a
+/// GitHub address of the owner or of one of its repositories.
+fn owner_from_answer(answer: &str) -> Option<(String, Option<Repository>)> {
+    let answer = answer.trim().trim_end_matches('/');
+    if let Some(repository) =
+        Repository::from_remote(answer).or_else(|| Repository::from_remote(&format!("https://{answer}")))
+    {
+        return Some((repository.owner.clone(), Some(repository)));
+    }
+    let name = answer
+        .strip_prefix("https://")
+        .or_else(|| answer.strip_prefix("http://"))
+        .unwrap_or(answer);
+    let name = name.strip_prefix("github.com/").unwrap_or(name);
+    agent::github::valid_owner(name).then(|| (name.to_ascii_lowercase(), None))
 }
 
 /// Walks through creating a fine-grained token in GitHub's pre-filled form, and reads it.
@@ -612,6 +632,29 @@ mod tests {
             None
         );
         assert_eq!(repository_from_remotes(""), None);
+    }
+
+    #[test]
+    fn an_owner_is_a_name_or_a_github_address_of_it_or_its_repositories() {
+        let repository = Some(Repository::new("digdir", "digdir-agents"));
+        for answer in [
+            "https://github.com/digdir/digdir-agents",
+            "https://github.com/Digdir/digdir-agents.git/",
+            "github.com/digdir/digdir-agents",
+            "git@github.com:digdir/digdir-agents.git",
+        ] {
+            assert_eq!(
+                owner_from_answer(answer),
+                Some(("digdir".to_owned(), repository.clone())),
+                "{answer}"
+            );
+        }
+        for answer in ["digdir", " Digdir ", "https://github.com/digdir", "github.com/digdir/"] {
+            assert_eq!(owner_from_answer(answer), Some(("digdir".to_owned(), None)), "{answer}");
+        }
+        for answer in ["", "https://gitlab.com/digdir/agents", "not an owner", "-digdir"] {
+            assert_eq!(owner_from_answer(answer), None, "{answer:?}");
+        }
     }
 
     #[test]
