@@ -93,13 +93,8 @@ async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> Comm
         .as_ref()
         .filter(|repository| owner.as_deref().is_none_or(|owner| owner == repository.owner));
     let inspection = agent::github::inspect(&token, checked).await?;
-    if let Some(expected) = expected_login.filter(|expected| !expected.eq_ignore_ascii_case(&inspection.account.login))
-    {
-        return Err(Error::Invalid(format!(
-            "the browser signed in as {}, not {expected}; nothing was stored. Sign in as {expected} and try again",
-            inspection.account.login
-        ))
-        .into());
+    if let Some(expected) = expected_login {
+        signed_in_as(&expected, &inspection.account.login)?;
     }
     let warnings = warnings(&inspection, kind, agent::github::host_login().as_deref());
     eprint!("{}", summary(&inspection, owner.as_deref(), &warnings));
@@ -246,6 +241,17 @@ fn browser_friction() -> Result<String, Error> {
     Ok(expected)
 }
 
+/// Refuses a browser sign-in as any account but the one the person named beforehand.
+fn signed_in_as(expected: &str, actual: &str) -> Result<(), Error> {
+    if expected.trim_start_matches('@').eq_ignore_ascii_case(actual) {
+        Ok(())
+    } else {
+        Err(Error::Invalid(format!(
+            "the browser signed in as {actual}, not {expected}; nothing was stored. Sign in as {expected} and try again"
+        )))
+    }
+}
+
 /// Soft warnings about a token, each one line.
 fn warnings(inspection: &Inspection, kind: TokenKind, host_login: Option<&str>) -> Vec<String> {
     let login = &inspection.account.login;
@@ -359,6 +365,19 @@ mod tests {
         assert!(warnings[1].contains("automation account"), "{warnings:?}");
         assert!(warnings[2].contains("every repository"), "{warnings:?}");
         assert!(warnings[3].contains("cannot see digdir/agents"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_browser_sign_in_as_another_account_is_refused() {
+        signed_in_as("digdir-bot", "Digdir-Bot").expect("the named account, in any case");
+        signed_in_as("@digdir-bot", "digdir-bot").expect("with a leading @");
+        let refused = signed_in_as("digdir-bot", "danielskovli").expect_err("another account");
+        assert!(
+            refused
+                .to_string()
+                .contains("signed in as danielskovli, not digdir-bot"),
+            "{refused}"
+        );
     }
 
     #[test]
