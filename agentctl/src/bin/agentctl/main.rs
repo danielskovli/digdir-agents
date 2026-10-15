@@ -496,6 +496,27 @@ enum GithubCommand {
     },
     /// List the stored tokens: owner, account, kind and expiry.
     List,
+    /// Forget a stored token, chosen from a list, or every one.
+    ///
+    /// Agents lose GitHub access on their next pass. The token stays valid on GitHub until you
+    /// revoke it there.
+    Logout {
+        /// Forget the token for this user or organization, without asking which.
+        #[arg(long, value_parser = parse_github_owner, conflicts_with = "everywhere")]
+        owner: Option<String>,
+        /// Forget every stored token, without asking which.
+        #[arg(long)]
+        everywhere: bool,
+        /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Forget every stored GitHub token, to start over.
+    Reset {
+        /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn parse_github_owner(value: &str) -> Result<String, String> {
@@ -636,6 +657,19 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
         Command::Github {
             command: GithubCommand::List,
         } => github::list(client).await?,
+        Command::Github {
+            command: GithubCommand::Logout { owner, everywhere, yes },
+        } => {
+            let target = if everywhere {
+                Some(agent::github::Logout::Everywhere)
+            } else {
+                owner.map(agent::github::Logout::Owner)
+            };
+            github::logout(client, target, yes).await?;
+        }
+        Command::Github {
+            command: GithubCommand::Reset { yes },
+        } => github::reset(client, yes).await?,
         Command::Init => {
             if let Some(name) = Box::pin(init::run(home, client)).await?
                 && prompt::confirm(&format!("Open a Session on {name} now?"))?
@@ -2155,6 +2189,29 @@ mod tests {
                 .command,
             Some(Command::Github {
                 command: GithubCommand::List
+            })
+        ));
+        assert!(matches!(
+            Arguments::try_parse_from(["agentctl", "github", "logout"])
+                .expect("logout")
+                .command,
+            Some(Command::Github {
+                command: GithubCommand::Logout {
+                    owner: None,
+                    everywhere: false,
+                    yes: false
+                }
+            })
+        ));
+        Arguments::try_parse_from(["agentctl", "github", "logout", "--owner", "digdir", "--everywhere"])
+            .err()
+            .expect("an owner or everywhere");
+        assert!(matches!(
+            Arguments::try_parse_from(["agentctl", "github", "reset", "--yes"])
+                .expect("reset")
+                .command,
+            Some(Command::Github {
+                command: GithubCommand::Reset { yes: true }
             })
         ));
     }

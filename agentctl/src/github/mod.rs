@@ -213,10 +213,10 @@ impl GithubToken {
             .is_some_and(|expires_at| expires_at <= now + EXPIRY_WARNING)
     }
 
-    /// `owner`, or `every owner` for the fallback.
+    /// `owner`, or `any other organization` for a token that reaches every owner.
     #[must_use]
     pub fn scope(&self) -> &str {
-        self.owner.as_deref().unwrap_or("every owner")
+        self.owner.as_deref().unwrap_or("any other organization")
     }
 }
 
@@ -228,6 +228,18 @@ pub struct GithubCheck {
     pub token: GithubToken,
     /// What GitHub reports about that token.
     pub inspection: Inspection,
+}
+
+/// Which stored tokens `agentctl github logout` forgets.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Logout {
+    /// The token kept for this owner.
+    Owner(String),
+    /// The token that reaches every owner without one of its own.
+    AnyOther,
+    /// Every stored token.
+    Everywhere,
 }
 
 /// Where a token for `owner`, or the fallback, is kept.
@@ -329,6 +341,30 @@ impl Authentication {
         self.api = api;
         self
     }
+}
+
+/// Forgets the stored tokens `logout` names, returning them. Their Agents lose GitHub access on
+/// their next reconciliation, which then fails naming the login to run. The tokens stay valid on
+/// GitHub until revoked there.
+///
+/// # Errors
+///
+/// Returns an error when the database cannot be read or written.
+pub(crate) async fn forget(database: &persistence::Database, logout: &Logout) -> Result<Vec<GithubToken>, Error> {
+    let forgotten: Vec<GithubToken> = tokens(database)
+        .await?
+        .into_iter()
+        .filter(|token| match logout {
+            Logout::Owner(owner) => token.owner.as_deref() == Some(owner.to_ascii_lowercase().as_str()),
+            Logout::AnyOther => token.owner.is_none(),
+            Logout::Everywhere => true,
+        })
+        .collect();
+    for token in &forgotten {
+        let (provider, secret) = names(token.owner.as_deref());
+        database.delete_provider_account(&provider, vec![secret]).await?;
+    }
+    Ok(forgotten)
 }
 
 /// Every stored GitHub token, owners first and the fallback last.
@@ -630,6 +666,58 @@ mod tests {
         assert_eq!(
             secret.allowed_hosts,
             ["github.com", "api.github.com", "gist.github.com", "uploads.github.com"]
+        );
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn logging_out_forgets_one_owner_any_other_or_everything() {
+        let directory = TempDir::new().expect("temporary directory");
+        let database = database(&directory);
+        let manager = Authentication::new(database.clone()).with_api(api_with("").await);
+        for (token, owner) in [
+            ("github_pat_digdir", Some("digdir")),
+            ("github_pat_altinn", Some("altinn")),
+            ("ghp_everywhere", None),
+        ] {
+            manager.login(Zeroizing::new(token.into()), owner).await.expect("login");
+        }
+        let owners = |tokens: Vec<GithubToken>| tokens.into_iter().map(|token| token.owner).collect::<Vec<_>>();
+        let digdir_secret = SecretReference::from_opaque("github-access-token/digdir");
+
+        assert_eq!(
+            owners(forget(&database, &Logout::Owner("DigDir".into())).await.expect("owner")),
+            [Some("digdir".to_owned())]
+        );
+        database
+            .resolve(&digdir_secret)
+            .await
+            .expect_err("the token itself is gone");
+        let (secret, _) = prepare(&database, Some("digdir"), at(0)).await.expect("any other");
+        assert_eq!(
+            database.resolve(&secret.reference).await.expect("resolve").expose(),
+            b"ghp_everywhere"
+        );
+
+        assert_eq!(
+            owners(forget(&database, &Logout::AnyOther).await.expect("any other")),
+            [None]
+        );
+        assert!(
+            prepare(&database, Some("digdir"), at(0))
+                .await
+                .is_err_and(|error| error.to_string().contains("agentctl github login --owner digdir"))
+        );
+
+        assert_eq!(
+            owners(forget(&database, &Logout::Everywhere).await.expect("everywhere")),
+            [Some("altinn".to_owned())]
+        );
+        assert!(tokens(&database).await.expect("tokens").is_empty());
+        assert!(
+            forget(&database, &Logout::Everywhere)
+                .await
+                .expect("nothing left")
+                .is_empty()
         );
     }
 

@@ -111,6 +111,24 @@ pub(super) fn provider_account_exists(connection: &Connection, provider: &str) -
         .map_err(database_error)
 }
 
+/// Removes a provider account and its credentials together.
+pub(super) fn delete_provider_account(
+    connection: &mut Connection,
+    provider: &str,
+    credentials: &[String],
+) -> Result<(), Error> {
+    let transaction = connection.transaction().map_err(database_error)?;
+    for credential in credentials {
+        transaction
+            .execute("DELETE FROM secrets WHERE name = ?1", [credential])
+            .map_err(database_error)?;
+    }
+    transaction
+        .execute("DELETE FROM provider_accounts WHERE provider = ?1", [provider])
+        .map_err(database_error)?;
+    transaction.commit().map_err(database_error)
+}
+
 /// Lists `(provider, metadata_json)` for every provider account whose name starts with `prefix`.
 pub(super) fn provider_accounts(connection: &Connection, prefix: &str) -> Result<Vec<(String, String)>, Error> {
     let mut statement = connection

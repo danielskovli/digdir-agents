@@ -231,13 +231,15 @@ account it acts as, whether it can see the repository and when it expires, and s
 It warns when the account is also your own `gh` login, is not named like an automation account (`…-bot`, `…-agent`),
 cannot see the repository, or expires within a week, and then asks for confirmation, defaulting to no.
 
-A fine-grained token is kept for its owner. A classic or OAuth token reaches every owner and is kept as the fallback
-for owners without a token of their own: `--from-stdin` reads any token, `--from-gh` imports the host's own `gh`
+A fine-grained token is kept for its owner. A classic or OAuth token reaches every owner and is kept for any other
+organization, one without a token of its own: `--from-stdin` reads any token, `--from-gh` imports the host's own `gh`
 login, and `--browser` runs the GitHub CLI's browser sign-in against a throwaway configuration. Because that token
 reaches every repository the account can, `--browser` first asks you to type the account's login and refuses a
-sign-in as any other. `agentctl github list` shows each token's owner, account, kind and expiry.
+sign-in as any other. `agentctl github list` shows each token's owner, account, kind and expiry. `agentctl github logout` forgets one, chosen from a list
+that ends with "everywhere", and `agentctl github reset` forgets them all after a warning. Agents lose GitHub access on
+their next pass; the token stays valid on GitHub until revoked there.
 
-An Agent opts in with `spec.accounts: [{type: github, owner: digdir}]`, and uses its owner's token or the fallback;
+An Agent opts in with `spec.accounts: [{type: github, owner: digdir}]`, and uses its owner's token or the one for any other organization;
 without `owner`, the only stored token. Its Sandbox then sees an inert `GITHUB_TOKEN`, which the network mediator
 replaces only in requests to `github.com`, `api.github.com`, `gist.github.com` and `uploads.github.com`; a manifest
 cannot widen that list. An expired token stops the Agent's reconciliation with an error naming the login to run. The

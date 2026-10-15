@@ -9,13 +9,13 @@ use crate::{Agent, Error, control_plane, control_plane::WaitPolicy, harness, ses
 use super::protocol::{
     DaemonInfo, DirectoryParams, ExecutionEnsureParams, GithubCheckParams, GithubLoginParams, JSON_RPC_VERSION,
     LoginParams, METHOD_APPLY, METHOD_AUTH_LOGIN, METHOD_AUTH_STATUS, METHOD_CONVERGE, METHOD_DELETE,
-    METHOD_EXECUTION_ENSURE, METHOD_GET, METHOD_GITHUB_CHECK, METHOD_GITHUB_LOGIN, METHOD_HEALTH, METHOD_LIST,
-    METHOD_PROGRESS, METHOD_RESOLVE_DIRECTORY, METHOD_RESOURCES_WATCH, METHOD_SESSION_ARCHIVE, METHOD_SESSION_DELETE,
-    METHOD_SESSION_ENSURE, METHOD_SESSION_GET, METHOD_SESSION_LIST, METHOD_SESSION_PROMPT, METHOD_SESSION_TURNS,
-    METHOD_SESSION_UNARCHIVE, METHOD_SHUTDOWN, METHOD_SSH_ACCESS, METHOD_START, METHOD_STOP, METHOD_VNC_ACCESS,
-    NameParams, ProgressParams, ReadMessage, Request, ResourcesWatchParams, Response, SessionEnsureParams,
-    SessionListParams, SessionParams, SessionPromptParams, SessionTurnsParams, ShutdownParams, ShutdownResult,
-    read_message,
+    METHOD_EXECUTION_ENSURE, METHOD_GET, METHOD_GITHUB_CHECK, METHOD_GITHUB_LOGIN, METHOD_GITHUB_LOGOUT, METHOD_HEALTH,
+    METHOD_LIST, METHOD_PROGRESS, METHOD_RESOLVE_DIRECTORY, METHOD_RESOURCES_WATCH, METHOD_SESSION_ARCHIVE,
+    METHOD_SESSION_DELETE, METHOD_SESSION_ENSURE, METHOD_SESSION_GET, METHOD_SESSION_LIST, METHOD_SESSION_PROMPT,
+    METHOD_SESSION_TURNS, METHOD_SESSION_UNARCHIVE, METHOD_SHUTDOWN, METHOD_SSH_ACCESS, METHOD_START, METHOD_STOP,
+    METHOD_VNC_ACCESS, NameParams, ProgressParams, ReadMessage, Request, ResourcesWatchParams, Response,
+    SessionEnsureParams, SessionListParams, SessionParams, SessionPromptParams, SessionTurnsParams, ShutdownParams,
+    ShutdownResult, read_message,
 };
 
 /// A byte stream usable by the Agent Control API client.
@@ -300,6 +300,15 @@ impl Client {
         owner: Option<String>,
     ) -> Result<crate::github::GithubToken, Error> {
         self.call(METHOD_GITHUB_LOGIN, GithubLoginParams { token, owner }).await
+    }
+
+    /// Forgets the stored GitHub tokens `logout` names, returning them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the daemon cannot be reached or cannot update its database.
+    pub async fn github_logout(&self, logout: crate::github::Logout) -> Result<Vec<crate::github::GithubToken>, Error> {
+        self.call(METHOD_GITHUB_LOGOUT, logout).await
     }
 
     /// Asks GitHub, through the daemon, about the stored token an Agent of `owner` would use and

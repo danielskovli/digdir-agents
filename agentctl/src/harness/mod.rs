@@ -315,6 +315,18 @@ impl AuthenticationManager {
         self.github.login(token, owner).await
     }
 
+    /// Forgets the stored GitHub tokens `logout` names, returning them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database cannot be read or written.
+    pub async fn github_logout(
+        &self,
+        logout: &crate::github::Logout,
+    ) -> Result<Vec<crate::github::GithubToken>, Error> {
+        crate::github::forget(&self.database, logout).await
+    }
+
     /// Asks GitHub about the stored token an Agent of `owner` would use.
     ///
     /// # Errors

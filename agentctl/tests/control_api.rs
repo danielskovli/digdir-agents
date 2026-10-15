@@ -163,6 +163,18 @@ impl AuthenticationApi for FakeAuthentication {
         Box::pin(async move { Ok(fake_github_token(token, owner)) })
     }
 
+    fn github_logout<'a>(
+        &'a self,
+        logout: &'a agent::github::Logout,
+    ) -> LocalFuture<'a, Result<Vec<agent::github::GithubToken>, Error>> {
+        Box::pin(async move {
+            Ok(match logout {
+                agent::github::Logout::Owner(owner) => vec![fake_github_token("github_pat_bot", Some(owner))],
+                agent::github::Logout::AnyOther | agent::github::Logout::Everywhere => Vec::new(),
+            })
+        })
+    }
+
     fn github_check<'a>(
         &'a self,
         owner: Option<&'a str>,
@@ -1228,6 +1240,14 @@ async fn the_github_login_check_and_authentication_status_round_trip() {
         .expect("GitHub check");
     assert_eq!(check.token.owner.as_deref(), Some("digdir"));
     assert_eq!(check.inspection.repository, Some((repository, true)));
+
+    let forgotten = fixture
+        .client
+        .github_logout(agent::github::Logout::Owner("digdir".into()))
+        .await
+        .expect("GitHub logout");
+    assert_eq!(forgotten.len(), 1);
+    assert_eq!(forgotten[0].owner.as_deref(), Some("digdir"));
 
     let status = fixture.client.auth_status().await.expect("status");
     assert!(status.claude_code);

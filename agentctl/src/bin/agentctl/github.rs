@@ -3,7 +3,7 @@
 use agent::{
     Error,
     control_api::Client,
-    github::{GithubToken, Inspection, Repository, TokenKind},
+    github::{GithubToken, Inspection, Logout, Repository, TokenKind},
 };
 use zeroize::Zeroizing;
 
@@ -25,7 +25,7 @@ pub(crate) enum Source {
 /// Gets a token from `source`, shows what GitHub says about it, and stores it once confirmed.
 ///
 /// A fine-grained token is kept for `owner`, by default the owner of the current directory's
-/// repository. Any other token reaches every owner and is kept as the fallback, unless `owner`
+/// repository. Any other token reaches every owner and is kept for any other organization, unless `owner`
 /// is named. Returns `None` when nothing was stored.
 ///
 /// # Errors
@@ -115,13 +115,148 @@ async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> Comm
     }
     let stored = client.github_login(token.to_string(), owner).await?;
     println!(
-        "Agents of {} now act as {} and commit as {} <{}>",
+        "Agents in {} now act as {} and commit as {} <{}>",
         stored.scope(),
         stored.account.login,
         stored.account.name,
         stored.account.email
     );
     Ok(Some(stored))
+}
+
+/// Forgets a stored token: the one `target` names, or one chosen from a menu.
+///
+/// # Errors
+///
+/// Returns an error when there is no terminal to choose or confirm on, or the daemon fails.
+pub(crate) async fn logout(client: &Client, target: Option<Logout>, yes: bool) -> CommandResult<()> {
+    let tokens = client.auth_status().await?.github;
+    if tokens.is_empty() {
+        println!("No GitHub tokens are stored.");
+        return Ok(());
+    }
+    if let Some(target) = target {
+        return forget(client, &tokens, target, yes, "Log out").await;
+    }
+    if !prompt::interactive() {
+        return Err(Error::Invalid("no terminal to choose on; pass `--owner` or `--everywhere`".into()).into());
+    }
+    eprintln!("Log out of GitHub for Agents in:");
+    let choices = logout_choices(&tokens);
+    for (number, (label, _)) in choices.iter().enumerate() {
+        eprintln!("  {}. {label}", number + 1);
+    }
+    let answer = prompt::ask(&format!("Choose 1-{}, or press Enter to cancel", choices.len()))?;
+    let Some(index) = choice(&answer, choices.len()) else {
+        eprintln!("Nothing was changed.");
+        return Ok(());
+    };
+    forget(client, &tokens, choices[index].1.clone(), yes, "Log out").await
+}
+
+/// Forgets every stored token, after a warning.
+///
+/// # Errors
+///
+/// Returns an error when there is no terminal to confirm on without `--yes`, or the daemon fails.
+pub(crate) async fn reset(client: &Client, yes: bool) -> CommandResult<()> {
+    let tokens = client.auth_status().await?.github;
+    if tokens.is_empty() {
+        println!("No GitHub tokens are stored; there is nothing to reset.");
+        return Ok(());
+    }
+    eprintln!("This forgets every GitHub token agentctl has stored. Agents using them lose GitHub access");
+    eprintln!("until you run `agentctl github login` again.");
+    forget(client, &tokens, Logout::Everywhere, yes, "Reset").await
+}
+
+/// Confirms, then forgets the tokens `target` names, and says what happened.
+async fn forget(client: &Client, tokens: &[GithubToken], target: Logout, yes: bool, verb: &str) -> CommandResult<()> {
+    let affected: Vec<&GithubToken> = tokens
+        .iter()
+        .filter(|token| match &target {
+            Logout::Owner(owner) => token.owner.as_deref() == Some(owner.as_str()),
+            Logout::AnyOther => token.owner.is_none(),
+            Logout::Everywhere => true,
+        })
+        .collect();
+    if affected.is_empty() {
+        println!("No stored GitHub token matches; nothing was changed.");
+        return Ok(());
+    }
+    eprintln!();
+    for token in &affected {
+        eprintln!("  {}", describe(token));
+    }
+    eprintln!();
+    if !yes {
+        if !prompt::interactive() {
+            return Err(Error::Invalid("no terminal to confirm on; pass `--yes`".into()).into());
+        }
+        let question = format!(
+            "{verb}: forget {}?",
+            if affected.len() == 1 {
+                "this token"
+            } else {
+                "these tokens"
+            }
+        );
+        if !prompt::confirm(&question)? {
+            eprintln!("Nothing was changed.");
+            return Ok(());
+        }
+    }
+    let forgotten = client.github_logout(target).await?;
+    println!(
+        "Forgot {} GitHub token{}. Agents using {} lose GitHub access on their next pass.",
+        forgotten.len(),
+        if forgotten.len() == 1 { "" } else { "s" },
+        if forgotten.len() == 1 { "it" } else { "them" }
+    );
+    println!("They remain valid on GitHub until revoked: {REVOKE_URL}");
+    Ok(())
+}
+
+/// Where tokens are revoked on GitHub: forgetting one here does not.
+const REVOKE_URL: &str = "https://github.com/settings/personal-access-tokens";
+
+/// The menu `logout` offers: one entry per stored token, then everywhere.
+fn logout_choices(tokens: &[GithubToken]) -> Vec<(String, Logout)> {
+    tokens
+        .iter()
+        .map(|token| {
+            let target = token.owner.clone().map_or(Logout::AnyOther, Logout::Owner);
+            (describe(token), target)
+        })
+        .chain(std::iter::once((
+            "Everywhere: every token above".to_owned(),
+            Logout::Everywhere,
+        )))
+        .collect()
+}
+
+/// A token in words: where it is used, whom it acts as, and when it expires.
+fn describe(token: &GithubToken) -> String {
+    let place = token
+        .owner
+        .as_deref()
+        .map_or_else(|| "Any other organization".to_owned(), ToOwned::to_owned);
+    format!(
+        "{place}: acts as {} ({} token, expires {})",
+        token.account.login,
+        token.kind.label(),
+        expiry(token, time::OffsetDateTime::now_utc())
+    )
+}
+
+/// The menu entry `answer` picks among `count`, numbered from 1.
+fn choice(answer: &str, count: usize) -> Option<usize> {
+    answer
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|number| (1..=count).contains(number))
+        .map(|number| number - 1)
 }
 
 /// Lists the stored tokens: owner, account, kind and expiry.
@@ -151,7 +286,7 @@ pub(crate) async fn list(client: &Client) -> CommandResult<()> {
 
 fn expiry(token: &GithubToken, now: time::OffsetDateTime) -> String {
     match token.expires_at {
-        None => "never or unknown".into(),
+        None => "never, or unknown".into(),
         Some(expires_at) if token.expired(now) => format!("{} (expired)", expires_at.date()),
         Some(expires_at) if token.expires_soon(now) => format!("{} (soon)", expires_at.date()),
         Some(expires_at) => expires_at.date().to_string(),
@@ -303,11 +438,7 @@ fn summary(inspection: &Inspection, owner: Option<&str>, warnings: &[String]) ->
         inspection.account.login, inspection.account.name, inspection.account.email
     );
     let _ = writeln!(text, "  Kind:      {}", inspection.kind.label());
-    let _ = writeln!(
-        text,
-        "  For:       {}",
-        owner.unwrap_or("every owner without a token of its own")
-    );
+    let _ = writeln!(text, "  For:       {}", owner.unwrap_or("any other organization"));
     if let Some((repository, visible)) = &inspection.repository {
         let _ = writeln!(
             text,
@@ -365,6 +496,49 @@ mod tests {
         assert!(warnings[1].contains("automation account"), "{warnings:?}");
         assert!(warnings[2].contains("every repository"), "{warnings:?}");
         assert!(warnings[3].contains("cannot see digdir/agents"), "{warnings:?}");
+    }
+
+    fn token(owner: Option<&str>, login: &str) -> GithubToken {
+        GithubToken {
+            owner: owner.map(str::to_owned),
+            account: GithubAccount {
+                login: login.into(),
+                name: login.into(),
+                email: format!("{login}@example.com"),
+            },
+            kind: if owner.is_some() {
+                TokenKind::FineGrained
+            } else {
+                TokenKind::Classic
+            },
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn logout_offers_each_token_in_words_and_then_everywhere() {
+        let choices = logout_choices(&[token(Some("digdir"), "digdir-bot"), token(None, "digdir-bot")]);
+        let labels: Vec<&str> = choices.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "digdir: acts as digdir-bot (fine-grained token, expires never, or unknown)",
+                "Any other organization: acts as digdir-bot (classic token, expires never, or unknown)",
+                "Everywhere: every token above",
+            ]
+        );
+        assert_eq!(choices[0].1, Logout::Owner("digdir".into()));
+        assert_eq!(choices[1].1, Logout::AnyOther);
+        assert_eq!(choices[2].1, Logout::Everywhere);
+    }
+
+    #[test]
+    fn a_menu_choice_is_a_listed_number_and_anything_else_cancels() {
+        assert_eq!(choice("1", 3), Some(0));
+        assert_eq!(choice(" 3 ", 3), Some(2));
+        for answer in ["", "0", "4", "digdir", "-1"] {
+            assert_eq!(choice(answer, 3), None, "{answer:?}");
+        }
     }
 
     #[test]

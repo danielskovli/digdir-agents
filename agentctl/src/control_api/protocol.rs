@@ -24,6 +24,7 @@ pub(crate) const METHOD_AUTH_LOGIN: &str = "authentication.v1.login";
 pub(crate) const METHOD_GITHUB_LOGIN: &str = "authentication.v1.githubLogin";
 pub(crate) const METHOD_AUTH_STATUS: &str = "authentication.v1.status";
 pub(crate) const METHOD_GITHUB_CHECK: &str = "authentication.v1.githubCheck";
+pub(crate) const METHOD_GITHUB_LOGOUT: &str = "authentication.v1.githubLogout";
 pub(crate) const METHOD_SESSION_ENSURE: &str = "sessions.v1.ensure";
 pub(crate) const METHOD_SESSION_GET: &str = "sessions.v1.get";
 pub(crate) const METHOD_SESSION_LIST: &str = "sessions.v1.list";

@@ -122,6 +122,16 @@ impl Database {
         .await
     }
 
+    /// Removes a provider account and its credentials together.
+    pub(crate) async fn delete_provider_account(&self, provider: &str, credentials: Vec<String>) -> Result<(), Error> {
+        self.request(|response| Command::DeleteProviderAccount {
+            provider: provider.into(),
+            credentials,
+            response,
+        })
+        .await
+    }
+
     /// Lists `(provider, metadata_json)` for every provider account whose name starts with `prefix`.
     pub(crate) async fn provider_accounts(&self, prefix: &str) -> Result<Vec<(String, String)>, Error> {
         self.request(|response| Command::ProviderAccounts {
@@ -563,6 +573,11 @@ enum Command {
         provider: String,
         response: oneshot::Sender<Result<Option<String>, Error>>,
     },
+    DeleteProviderAccount {
+        provider: String,
+        credentials: Vec<String>,
+        response: oneshot::Sender<Result<(), Error>>,
+    },
     ProviderAccounts {
         prefix: String,
         response: oneshot::Sender<Result<Vec<(String, String)>, Error>>,
@@ -686,6 +701,7 @@ impl Command {
             | Self::ProviderAccountExists { .. }
             | Self::ProviderAccountMetadata { .. }
             | Self::ProviderAccounts { .. }
+            | Self::DeleteProviderAccount { .. }
             | Self::GetSession { .. }
             | Self::GetSessionByName { .. }
             | Self::ListAllSessions { .. }
@@ -847,6 +863,13 @@ fn execute(connection: &mut Connection, command: Command) {
         }
         Command::ProviderAccountMetadata { provider, response } => {
             let _ = response.send(secrets::provider_account_metadata(connection, &provider));
+        }
+        Command::DeleteProviderAccount {
+            provider,
+            credentials,
+            response,
+        } => {
+            let _ = response.send(secrets::delete_provider_account(connection, &provider, &credentials));
         }
         Command::ProviderAccounts { prefix, response } => {
             let _ = response.send(secrets::provider_accounts(connection, &prefix));
