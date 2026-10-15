@@ -164,7 +164,8 @@ async fn github_account(
     if !spec.github_account() {
         return Ok(Vec::new());
     }
-    let (secret, account) = crate::github::prepare(database).await?;
+    let (secret, account) =
+        crate::github::prepare(database, spec.github_owner(), time::OffsetDateTime::now_utc()).await?;
     managed_secrets.push(secret);
     // Validation requires GIT_USER_NAME and GIT_USER_EMAIL together, so one stands for both.
     if spec.environment.iter().any(|variable| variable.name == GIT_USER_NAME) {
@@ -237,7 +238,7 @@ spec:
                     value: Zeroizing::new(b"real-token".to_vec()),
                 }],
                 metadata_json:
-                    r#"{"login":"digdir-bot","name":"Digdir Bot","email":"42+digdir-bot@users.noreply.github.com"}"#
+                    r#"{"login":"digdir-bot","name":"Digdir Bot","email":"42+digdir-bot@users.noreply.github.com","kind":"classic"}"#
                         .into(),
             })
             .await

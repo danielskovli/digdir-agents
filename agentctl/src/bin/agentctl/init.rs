@@ -36,17 +36,7 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResu
         }
         status = client.auth_status().await?;
     }
-    if status.github.is_none()
-        && prompt::confirm(
-            "Agents can act as a GitHub account, such as a bot, to clone, push and open pull requests. Sign in to one now?",
-        )?
-    {
-        // Optional: a token GitHub refuses leaves the Agent without the account, not without init.
-        match crate::github_login(client, false, false).await {
-            Ok(account) => status.github = Some(account),
-            Err(error) => eprintln!("agentctl: {error}; continuing without the GitHub account"),
-        }
-    }
+    let github = github_account(client, &status).await;
     if crate::tui::working_tree_manifests(&directory).is_empty() {
         let manifest = manifest_location(&directory);
         let root = manifest.parent().unwrap_or(&directory);
@@ -62,7 +52,7 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResu
         if !prompt::confirm(&format!("No Agent manifest here. Write {}?", manifest.display()))? {
             return Ok(None);
         }
-        write_new(&manifest, &template(&agent_name(root), &status))?;
+        write_new(&manifest, &template(&agent_name(root), &status, &github))?;
         eprintln!(
             "Wrote {}; edit it to change the image, resources or access.",
             manifest.display()
@@ -83,6 +73,88 @@ fn write_new(path: &Path, contents: &str) -> Result<(), Error> {
     let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(contents.as_bytes())?;
     Ok(())
+}
+
+/// Whether a new manifest gives the Agent a GitHub token, and whose.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Github {
+    /// No token applies; the manifest shows how to add one.
+    None,
+    /// The only stored token, whichever owner it is for.
+    Only,
+    /// The token for this owner, or the fallback.
+    Owner(String),
+}
+
+/// Makes sure Agents of this repository have a working GitHub token: present, not expired, and
+/// able to see the repository. Offers the login when not; GitHub is optional, so a failure
+/// leaves the Agent without it rather than stopping init.
+async fn github_account(client: &Client, status: &AuthenticationStatus) -> Github {
+    let Some(repository) = crate::github::current_repository() else {
+        return match status.github.as_slice() {
+            [_] => Github::Only,
+            [] => offer_github_login(client, None).await,
+            _ => Github::None,
+        };
+    };
+    let owner = repository.owner.clone();
+    match client.github_check(Some(owner.clone()), Some(repository.clone())).await {
+        Ok(check) => {
+            let now = time::OffsetDateTime::now_utc();
+            let visible = check
+                .inspection
+                .repository
+                .as_ref()
+                .is_some_and(|(_, visible)| *visible);
+            let expiring = check.token.expires_soon(now)
+                || check
+                    .inspection
+                    .expires_at
+                    .is_some_and(|expires_at| expires_at <= now + agent::github::EXPIRY_WARNING);
+            if visible && !expiring {
+                eprintln!(
+                    "GitHub: Agents act as {} for {owner}, and can see {repository}.",
+                    check.inspection.account.login
+                );
+                return Github::Owner(owner);
+            }
+            eprintln!(
+                "GitHub: the token for {} {}.",
+                check.token.scope(),
+                if visible {
+                    "expires within a week"
+                } else {
+                    "cannot see this repository"
+                }
+            );
+            match offer_github_login(client, Some(owner.clone())).await {
+                Github::None if visible => Github::Owner(owner),
+                chosen => chosen,
+            }
+        }
+        Err(error) => {
+            eprintln!("GitHub: {}", crate::inference_error(error));
+            offer_github_login(client, Some(owner)).await
+        }
+    }
+}
+
+async fn offer_github_login(client: &Client, owner: Option<String>) -> Github {
+    let question = format!(
+        "Agents can act as a GitHub account, such as a bot, to push and open pull requests{}. Set up a token now?",
+        owner.as_deref().map(|owner| format!(" in {owner}")).unwrap_or_default()
+    );
+    if !prompt::confirm(&question).unwrap_or(false) {
+        return Github::None;
+    }
+    match crate::github::login(client, crate::github::Source::Form, owner).await {
+        Ok(Some(token)) => token.owner.map_or(Github::Only, Github::Owner),
+        Ok(None) => Github::None,
+        Err(error) => {
+            eprintln!("agentctl: {error}; continuing without GitHub");
+            Github::None
+        }
+    }
 }
 
 /// Offers the Claude Code login, then the Codex one, returning whether either was stored.
@@ -126,7 +198,7 @@ fn agent_name(root: &Path) -> String {
 }
 
 /// A manifest with the signed-in harnesses and, when one is signed in, the GitHub account.
-fn template(name: &str, status: &AuthenticationStatus) -> String {
+fn template(name: &str, status: &AuthenticationStatus, github: &Github) -> String {
     let mut harnesses = String::new();
     if status.claude_code {
         harnesses.push_str("    - type: claudeCode\n      auth: mediated\n");
@@ -142,10 +214,17 @@ fn template(name: &str, status: &AuthenticationStatus) -> String {
             );
         }
     }
-    let accounts = if status.github.is_some() {
-        "  # Act as the account `agentctl github login` stored.\n  accounts:\n    - type: github\n"
-    } else {
-        "  # Run `agentctl github login` and uncomment to act as a GitHub account.\n  # accounts:\n  #   - type: github\n"
+    let accounts = match github {
+        Github::Owner(owner) => format!(
+            "  # Act as the GitHub token `agentctl github login` stored for {owner}.\n  accounts:\n    - type: github\n      owner: {owner}\n"
+        ),
+        Github::Only => {
+            "  # Act as the GitHub token `agentctl github login` stored.\n  accounts:\n    - type: github\n".to_owned()
+        }
+        Github::None => {
+            "  # Run `agentctl github login` and uncomment to act as a GitHub account.\n  # accounts:\n  #   - type: github\n"
+                .to_owned()
+        }
     };
     let code = agent::sandbox::platform::WORKING_DIRECTORY;
     format!(
@@ -196,16 +275,11 @@ mod tests {
 
     use super::*;
 
-    fn status(claude_code: bool, codex: bool, github: bool) -> AuthenticationStatus {
+    fn status(claude_code: bool, codex: bool) -> AuthenticationStatus {
         AuthenticationStatus {
             claude_code,
             codex,
-            github: github.then(|| agent::github::GithubAccount {
-                login: "digdir-bot".into(),
-                name: "Digdir Bot".into(),
-                email: "bot@example.com".into(),
-                missing_scopes: Vec::new(),
-            }),
+            github: Vec::new(),
         }
     }
 
@@ -215,7 +289,7 @@ mod tests {
 
     #[test]
     fn the_template_declares_the_signed_in_harnesses() {
-        let claude = decoded(&template("worker", &status(true, false, false)));
+        let claude = decoded(&template("worker", &status(true, false), &Github::None));
         assert_eq!(claude.metadata.name, "worker");
         assert_eq!(claude.spec.harnesses.len(), 1);
         assert_eq!(claude.spec.harnesses[0].kind, agent::Harness::ClaudeCode);
@@ -223,7 +297,7 @@ mod tests {
         assert!(claude.spec.ssh_access());
         assert_eq!(claude.spec.home, None);
 
-        let both = decoded(&template("worker", &status(true, true, false)));
+        let both = decoded(&template("worker", &status(true, true), &Github::None));
         assert_eq!(
             both.spec.default_harness().map(|harness| harness.kind),
             Some(agent::Harness::ClaudeCode)
@@ -234,19 +308,24 @@ mod tests {
                 .is_some_and(|codex| codex.optional)
         );
 
-        let codex = decoded(&template("worker", &status(false, true, false)));
+        let codex = decoded(&template("worker", &status(false, true), &Github::None));
         assert_eq!(codex.spec.harnesses.len(), 1);
         assert!(!codex.spec.harnesses[0].optional);
     }
 
     #[test]
-    fn the_template_uses_the_github_account_only_when_one_is_signed_in() {
-        assert!(
-            decoded(&template("worker", &status(true, false, true)))
-                .spec
-                .github_account()
-        );
-        let without = template("worker", &status(true, false, false));
+    fn the_template_names_the_github_owner_only_when_a_token_applies() {
+        let owned = decoded(&template(
+            "worker",
+            &status(true, false),
+            &Github::Owner("digdir".into()),
+        ));
+        assert!(owned.spec.github_account());
+        assert_eq!(owned.spec.github_owner(), Some("digdir"));
+        let only = decoded(&template("worker", &status(true, false), &Github::Only));
+        assert!(only.spec.github_account());
+        assert_eq!(only.spec.github_owner(), None);
+        let without = template("worker", &status(true, false), &Github::None);
         assert!(!decoded(&without).spec.github_account());
         assert!(without.contains("# accounts:"), "{without}");
     }
@@ -262,7 +341,7 @@ mod tests {
 
     #[test]
     fn the_template_offers_this_checkout_as_a_commented_mount() {
-        let text = template("worker", &status(true, false, false));
+        let text = template("worker", &status(true, false), &Github::None);
         let uncommented = text
             .replace("    # mounts:", "    mounts:")
             .replace("    #   ", "      ");

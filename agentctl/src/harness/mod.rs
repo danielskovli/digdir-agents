@@ -256,9 +256,9 @@ pub struct AuthenticationStatus {
     pub claude_code: bool,
     /// Whether `agentctl codex login` has stored a Codex credential.
     pub codex: bool,
-    /// The account `agentctl github login` stored, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub github: Option<crate::github::GithubAccount>,
+    /// The GitHub tokens `agentctl github login` stored, without the tokens.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub github: Vec<crate::github::GithubToken>,
 }
 
 impl AuthenticationStatus {
@@ -298,17 +298,34 @@ impl AuthenticationManager {
         Ok(AuthenticationStatus {
             claude_code: authentication_ready(Harness::ClaudeCode, &self.database).await?,
             codex: authentication_ready(Harness::Codex, &self.database).await?,
-            github: crate::github::account(&self.database).await?,
+            github: crate::github::tokens(&self.database).await?,
         })
     }
 
-    /// Stores the GitHub token Agents with the GitHub account use, returning its account.
+    /// Stores a GitHub token for Agents of `owner`, or for every owner without one of its own.
     ///
     /// # Errors
     ///
     /// Returns an error when GitHub rejects the token or cannot be reached, or it cannot be persisted.
-    pub async fn github_login(&self, token: Zeroizing<String>) -> Result<crate::github::GithubAccount, Error> {
-        self.github.login(token).await
+    pub async fn github_login(
+        &self,
+        token: Zeroizing<String>,
+        owner: Option<&str>,
+    ) -> Result<crate::github::GithubToken, Error> {
+        self.github.login(token, owner).await
+    }
+
+    /// Asks GitHub about the stored token an Agent of `owner` would use.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no stored token applies, or GitHub rejects it or cannot be reached.
+    pub async fn github_check(
+        &self,
+        owner: Option<&str>,
+        repository: Option<&crate::github::Repository>,
+    ) -> Result<crate::github::GithubCheck, Error> {
+        self.github.check(owner, repository).await
     }
 
     /// Stores a credential for the selected harness.

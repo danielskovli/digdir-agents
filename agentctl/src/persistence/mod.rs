@@ -122,6 +122,15 @@ impl Database {
         .await
     }
 
+    /// Lists `(provider, metadata_json)` for every provider account whose name starts with `prefix`.
+    pub(crate) async fn provider_accounts(&self, prefix: &str) -> Result<Vec<(String, String)>, Error> {
+        self.request(|response| Command::ProviderAccounts {
+            prefix: prefix.into(),
+            response,
+        })
+        .await
+    }
+
     pub(crate) async fn provider_account_metadata(&self, provider: &str) -> Result<Option<String>, Error> {
         self.request(|response| Command::ProviderAccountMetadata {
             provider: provider.into(),
@@ -554,6 +563,10 @@ enum Command {
         provider: String,
         response: oneshot::Sender<Result<Option<String>, Error>>,
     },
+    ProviderAccounts {
+        prefix: String,
+        response: oneshot::Sender<Result<Vec<(String, String)>, Error>>,
+    },
     EnsureSession {
         agent: String,
         name: crate::sessions::SessionName,
@@ -672,6 +685,7 @@ impl Command {
             | Self::PutProviderAccount { .. }
             | Self::ProviderAccountExists { .. }
             | Self::ProviderAccountMetadata { .. }
+            | Self::ProviderAccounts { .. }
             | Self::GetSession { .. }
             | Self::GetSessionByName { .. }
             | Self::ListAllSessions { .. }
@@ -833,6 +847,9 @@ fn execute(connection: &mut Connection, command: Command) {
         }
         Command::ProviderAccountMetadata { provider, response } => {
             let _ = response.send(secrets::provider_account_metadata(connection, &provider));
+        }
+        Command::ProviderAccounts { prefix, response } => {
+            let _ = response.send(secrets::provider_accounts(connection, &prefix));
         }
         session_command => execute_session(connection, session_command),
     }

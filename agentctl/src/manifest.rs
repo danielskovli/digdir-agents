@@ -259,13 +259,18 @@ pub enum AccessSpec {
 /// One host account an Agent acts as.
 ///
 /// The platform owns the credential, its placeholder and the hosts it is
-/// substituted for, so a variant carries no tunables.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+/// substituted for; a manifest only says which account.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase", tag = "type")]
 pub enum AccountSpec {
-    /// The GitHub account stored by `agentctl github login`: a mediated `GITHUB_TOKEN` for
-    /// GitHub's hosts, and the account's name and email for Git commits.
-    Github {},
+    /// A GitHub token stored by `agentctl github login`: a mediated `GITHUB_TOKEN` for GitHub's
+    /// hosts, and the token's account name and email for Git commits.
+    Github {
+        /// The user or organization whose token the Agent uses; the host's fallback token when
+        /// it has none for this owner. Omitted, the only stored token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+    },
 }
 
 /// Sandbox settings as supplied by an Agent manifest.
@@ -486,10 +491,20 @@ impl Spec {
         self.access.contains(&AccessSpec::Vnc {})
     }
 
-    /// Returns whether the Agent acts as the host's GitHub account.
+    /// Returns whether the Agent acts as a GitHub account.
     #[must_use]
     pub fn github_account(&self) -> bool {
-        self.accounts.contains(&AccountSpec::Github {})
+        self.accounts
+            .iter()
+            .any(|account| matches!(account, AccountSpec::Github { .. }))
+    }
+
+    /// Returns the owner whose GitHub token the Agent uses, when the manifest names one.
+    #[must_use]
+    pub fn github_owner(&self) -> Option<&str> {
+        self.accounts.iter().find_map(|account| match account {
+            AccountSpec::Github { owner } => owner.as_deref(),
+        })
     }
 
     fn validate(&self) -> Result<(), Error> {
@@ -562,9 +577,18 @@ impl Spec {
                 "spec.access[{index}] duplicates an access capability"
             )));
         }
-        let mut accounts = std::collections::BTreeSet::new();
-        if let Some(index) = self.accounts.iter().position(|account| !accounts.insert(*account)) {
+        let mut accounts = std::collections::HashSet::new();
+        if let Some(index) = self
+            .accounts
+            .iter()
+            .position(|account| !accounts.insert(std::mem::discriminant(account)))
+        {
             return Err(Error::Invalid(format!("spec.accounts[{index}] duplicates an account")));
+        }
+        if let Some(owner) = self.github_owner().filter(|owner| !crate::github::valid_owner(owner)) {
+            return Err(Error::Invalid(format!(
+                "spec.accounts: {owner:?} is not a GitHub user or organization"
+            )));
         }
         if self.network.deny.iter().any(|host| !valid_host_pattern(host)) {
             return Err(Error::Invalid(

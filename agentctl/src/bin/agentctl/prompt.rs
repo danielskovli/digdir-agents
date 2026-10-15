@@ -25,6 +25,32 @@ pub(crate) fn confirm(question: &str) -> Result<bool, Error> {
     Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
+/// Asks a yes-or-no question whose answer is yes unless `n` or `no` is typed.
+///
+/// # Errors
+///
+/// Returns an error when standard input cannot be read.
+pub(crate) fn confirm_default_yes(question: &str) -> Result<bool, Error> {
+    eprint!("{question} [Y/n] ");
+    std::io::stderr().flush().ok();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(!matches!(answer.trim().to_ascii_lowercase().as_str(), "n" | "no"))
+}
+
+/// Asks for one line of text, returned trimmed.
+///
+/// # Errors
+///
+/// Returns an error when standard input cannot be read.
+pub(crate) fn ask(question: &str) -> Result<String, Error> {
+    eprint!("{question}: ");
+    std::io::stderr().flush().ok();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(answer.trim().to_owned())
+}
+
 /// Reads a secret typed or pasted on the terminal without echoing it.
 ///
 /// # Errors

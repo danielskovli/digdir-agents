@@ -218,25 +218,35 @@ than bind-mounting it, so package managers can still replace the bundle, and it 
 anchor so a regenerated bundle keeps trusting mediation. Docker and dockerd are not covered by this convenience
 wiring.
 
-## GitHub account
+## GitHub accounts
 
-`agentctl github login` stores one GitHub token for Agents, separate from any `gh` login on the host, so Agents can
-act as their own account, such as a bot, while you keep using yours. It runs the GitHub CLI's own browser sign-in
-against a throwaway configuration, so your `gh` login and Git configuration are untouched and agentctl needs no OAuth
-app of its own; approve it in a browser signed in as the account Agents should use. Without the GitHub CLI it asks for
-a pasted token, `--from-stdin` reads one, and `--from-gh` takes the active `gh` login instead. The sign-in requests
-`repo`, `read:org`, `gist`, `workflow`, `read:project` and `write:packages`, so pushing workflow files, `gh pr edit`
-and container images work, and login warns when a classic token lacks any of them. GitHub is asked which account the
-token belongs to, and that account's name and email, or its noreply address, become the Agents' Git identity.
+agentd keeps GitHub tokens for Agents, one per owner, separate from any `gh` login on the host, so Agents can act as
+their own account, such as a bot, while you keep using yours.
 
-An Agent opts in with `spec.accounts: [{type: github}]`. Its Sandbox then sees an inert `GITHUB_TOKEN`, which the
-network mediator replaces only in requests to `github.com`, `api.github.com`, `gist.github.com` and
-`uploads.github.com`; a manifest cannot widen that list. The account's identity applies unless the manifest selects
+`agentctl github login` walks through creating a fine-grained token for the owner of the current directory's
+repository, or `--owner`. It opens GitHub's token form with the name, owner, a 90-day lifetime and the permissions
+filled in: contents, issues, pull requests, Actions and workflow files read and write, and commit statuses read. You
+pick the repositories, the one thing the form cannot be given, and paste the token. agentctl then asks GitHub which
+account it acts as, whether it can see the repository and when it expires, and shows that before anything is stored.
+It warns when the account is also your own `gh` login, is not named like an automation account (`…-bot`, `…-agent`),
+cannot see the repository, or expires within a week, and then asks for confirmation, defaulting to no.
+
+A fine-grained token is kept for its owner. A classic or OAuth token reaches every owner and is kept as the fallback
+for owners without a token of their own: `--from-stdin` reads any token, `--from-gh` imports the host's own `gh`
+login, and `--browser` runs the GitHub CLI's browser sign-in against a throwaway configuration. Because that token
+reaches every repository the account can, `--browser` first asks you to type the account's login and refuses a
+sign-in as any other. `agentctl github list` shows each token's owner, account, kind and expiry.
+
+An Agent opts in with `spec.accounts: [{type: github, owner: digdir}]`, and uses its owner's token or the fallback;
+without `owner`, the only stored token. Its Sandbox then sees an inert `GITHUB_TOKEN`, which the network mediator
+replaces only in requests to `github.com`, `api.github.com`, `gist.github.com` and `uploads.github.com`; a manifest
+cannot widen that list. An expired token stops the Agent's reconciliation with an error naming the login to run. The
+token's account name and email, or its noreply address, become the Agent's Git identity unless the manifest selects
 `GIT_USER_NAME` and `GIT_USER_EMAIL` itself. When the image has Git, setup also gives Git the token for GitHub over
 HTTPS and rewrites GitHub's SSH URLs to HTTPS, since the Sandbox has no SSH key, unless the image configured either
-itself. A manifest with the account cannot also bind its own `GITHUB_TOKEN`.
-Signing in again as a different account changes that identity, which restarts running Agents with the account on
-their next pass, as any change to a Sandbox's environment does.
+itself. A manifest with the account cannot also bind its own `GITHUB_TOKEN`. Changing the account a token acts as
+changes that identity, which restarts the Agent's running Sandbox on its next pass, as any change to a Sandbox's
+environment does.
 
 SQLite `secure_delete` and owner-only filesystem permissions provide local hygiene. They are not a cryptographic
 erasure guarantee across WAL history, filesystem snapshots or backups.

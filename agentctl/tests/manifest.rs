@@ -601,3 +601,29 @@ fn the_github_account_is_opt_in_and_owns_github_token() {
         Err(agent::Error::Invalid(message)) if message.contains("spec.environment[0]")
     ));
 }
+
+#[test]
+fn the_github_account_may_name_its_owner_once() {
+    let owned = manifest::decode(&manifest_with_access(
+        "  accounts:\n    - type: github\n      owner: Digdir-Team\n",
+    ))
+    .expect("an owner");
+    assert_eq!(owned.spec.github_owner(), Some("Digdir-Team"));
+    let encoded = serde_yaml_ng::to_string(&owned).expect("encode");
+    assert!(encoded.contains("owner: Digdir-Team"), "{encoded}");
+
+    let unowned = manifest::decode(&manifest_with_access("  accounts:\n    - type: github\n")).expect("no owner");
+    assert_eq!(unowned.spec.github_owner(), None);
+    assert!(unowned.spec.github_account());
+
+    assert!(matches!(
+        manifest::decode(&manifest_with_access("  accounts:\n    - type: github\n      owner: not/an/owner\n")),
+        Err(agent::Error::Invalid(message)) if message.contains("not a GitHub user or organization")
+    ));
+    assert!(matches!(
+        manifest::decode(&manifest_with_access(
+            "  accounts:\n    - type: github\n      owner: digdir\n    - type: github\n      owner: altinn\n"
+        )),
+        Err(agent::Error::Invalid(message)) if message.contains("spec.accounts[1]")
+    ));
+}

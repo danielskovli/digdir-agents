@@ -18,6 +18,7 @@ use agent::{
 use clap::{Parser, Subcommand, ValueEnum};
 
 mod format;
+mod github;
 mod init;
 mod launch;
 mod progress;
@@ -469,20 +470,40 @@ enum CodexCommand {
 
 #[derive(Subcommand)]
 enum GithubCommand {
-    /// Sign in to GitHub for Agents, separately from any `gh` login on this host.
+    /// Store a GitHub token for Agents, separate from any `gh` login on this host.
     ///
-    /// Runs the GitHub CLI's own browser sign-in in a throwaway configuration, so your `gh` login
-    /// is untouched, and asks for a pasted token when the GitHub CLI is not installed. Agents
-    /// whose manifest lists `accounts: [{type: github}]` act as this account: they see an inert
-    /// `GITHUB_TOKEN` that only requests to GitHub receive, and commit as the account.
+    /// By default it walks you through creating a fine-grained token in GitHub's pre-filled
+    /// form, for the owner of the current directory's repository. The token is checked and
+    /// summarized before anything is stored. Agents whose manifest lists
+    /// `accounts: [{type: github, owner: …}]` act as the owner's token: they see an inert
+    /// `GITHUB_TOKEN` that only requests to GitHub receive, and commit as its account.
     Login {
-        /// Read the token from standard input instead of signing in.
-        #[arg(long, conflicts_with = "from_gh")]
+        /// The user or organization the token is for; by default the owner of the current
+        /// directory's GitHub repository.
+        #[arg(long, value_parser = parse_github_owner)]
+        owner: Option<String>,
+        /// Read the token from standard input instead of creating one.
+        #[arg(long, group = "source")]
         from_stdin: bool,
-        /// Use the token of the host's active `gh` login, which is often your own account.
-        #[arg(long)]
+        /// Use the token of the host's own `gh` login, which is usually your own account and
+        /// reaches every repository it can.
+        #[arg(long, group = "source")]
         from_gh: bool,
+        /// Sign in through the GitHub CLI in the browser instead. The token reaches every
+        /// repository the account can, so you name the account first.
+        #[arg(long, group = "source")]
+        browser: bool,
     },
+    /// List the stored tokens: owner, account, kind and expiry.
+    List,
+}
+
+fn parse_github_owner(value: &str) -> Result<String, String> {
+    if agent::github::valid_owner(value) {
+        Ok(value.to_ascii_lowercase())
+    } else {
+        Err(format!("{value:?} is not a GitHub user or organization"))
+    }
 }
 
 fn main() -> ExitCode {
@@ -593,10 +614,28 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
             command: CodexCommand::Login { from_stdin },
         } => harness_login(home, client, agent::Harness::Codex, from_stdin).await?,
         Command::Github {
-            command: GithubCommand::Login { from_stdin, from_gh },
+            command:
+                GithubCommand::Login {
+                    owner,
+                    from_stdin,
+                    from_gh,
+                    browser,
+                },
         } => {
-            github_login(client, from_stdin, from_gh).await?;
+            let source = if from_stdin {
+                github::Source::Stdin
+            } else if from_gh {
+                github::Source::HostGh
+            } else if browser {
+                github::Source::Browser
+            } else {
+                github::Source::Form
+            };
+            github::login(client, source, owner).await?;
         }
+        Command::Github {
+            command: GithubCommand::List,
+        } => github::list(client).await?,
         Command::Init => {
             if let Some(name) = Box::pin(init::run(home, client)).await?
                 && prompt::confirm(&format!("Open a Session on {name} now?"))?
@@ -1766,49 +1805,6 @@ async fn harness_login(
     Ok(())
 }
 
-/// Stores the GitHub token Agents use, asking for it unless it comes from standard input or `gh`.
-async fn github_login(client: &Client, from_stdin: bool, from_gh: bool) -> CommandResult<agent::github::GithubAccount> {
-    let token = if from_stdin {
-        read_token_from_stdin()?
-    } else if from_gh {
-        agent::github::token_from_gh()?
-    } else {
-        sign_in_to_github()?
-    };
-    let account = client.github_login(token.to_string()).await?;
-    println!(
-        "Agents with the GitHub account now act as {} and commit as {} <{}>",
-        account.login, account.name, account.email
-    );
-    if !account.missing_scopes.is_empty() {
-        eprintln!(
-            "Warning: the token lacks {}, so some `gh` and Git commands in Agents will fail; \
-             sign in again, or grant {}.",
-            account.missing_scopes.join(", "),
-            agent::github::SCOPES.join(", ")
-        );
-    }
-    Ok(account)
-}
-
-/// Signs in through the GitHub CLI's browser flow, or asks for a token without it.
-fn sign_in_to_github() -> Result<zeroize::Zeroizing<String>, Error> {
-    if !prompt::interactive() {
-        return Err(Error::Invalid(
-            "no terminal to sign in to GitHub on; pass a token with `--from-stdin`".into(),
-        ));
-    }
-    eprintln!("Agents get their own GitHub sign-in, separate from your `gh` login, so it can be another account.");
-    eprintln!(
-        "Approve it in a browser signed in as the account Agents should act as, such as a private window for a bot."
-    );
-    if let Some(token) = agent::github::token_from_gh_sign_in()? {
-        return Ok(token);
-    }
-    eprintln!("The GitHub CLI is not installed, so paste a token instead.");
-    ask_for_github_token()
-}
-
 /// Attaches to a new Session with the first free name, `s1`, `s2` and so on.
 async fn attach_new_session(home: &ControlPlaneHome, client: &Client, agent: &str) -> CommandResult<()> {
     let taken: Vec<String> = client
@@ -1833,19 +1829,6 @@ async fn attach_new_session(home: &ControlPlaneHome, client: &Client, agent: &st
         SessionSelection::default(),
     )
     .await
-}
-
-fn ask_for_github_token() -> Result<zeroize::Zeroizing<String>, Error> {
-    if !prompt::interactive() {
-        return Err(Error::Invalid(
-            "no terminal to ask for a GitHub token on; pass it with `--from-stdin`".into(),
-        ));
-    }
-    eprintln!(
-        "Create one at https://github.com/settings/tokens while signed in as that account; a classic token needs {}.",
-        agent::github::SCOPES.join(", ")
-    );
-    prompt::secret("GitHub token")
 }
 
 fn read_token_from_stdin() -> Result<zeroize::Zeroizing<String>, Error> {
@@ -2145,19 +2128,35 @@ mod tests {
         assert!(bare.command.is_none());
         let init = Arguments::try_parse_from(["agentctl", "init"]).expect("init");
         assert!(matches!(init.command, Some(Command::Init)));
-        let login = Arguments::try_parse_from(["agentctl", "github", "login", "--from-gh"]).expect("github login");
+        let login = Arguments::try_parse_from(["agentctl", "github", "login", "--owner", "Digdir", "--browser"])
+            .expect("github login");
         assert!(matches!(
             login.command,
             Some(Command::Github {
                 command: GithubCommand::Login {
+                    owner: Some(owner),
                     from_stdin: false,
-                    from_gh: true
+                    from_gh: false,
+                    browser: true,
                 }
+            }) if owner == "digdir"
+        ));
+        for sources in [["--from-gh", "--from-stdin"], ["--browser", "--from-gh"]] {
+            let mut arguments = vec!["agentctl", "github", "login"];
+            arguments.extend(sources);
+            Arguments::try_parse_from(arguments).err().expect("one token source");
+        }
+        Arguments::try_parse_from(["agentctl", "github", "login", "--owner", "not/an/owner"])
+            .err()
+            .expect("an invalid owner");
+        assert!(matches!(
+            Arguments::try_parse_from(["agentctl", "github", "list"])
+                .expect("list")
+                .command,
+            Some(Command::Github {
+                command: GithubCommand::List
             })
         ));
-        Arguments::try_parse_from(["agentctl", "github", "login", "--from-gh", "--from-stdin"])
-            .err()
-            .expect("one token source");
     }
 
     #[test]

@@ -7,14 +7,15 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use crate::{Agent, Error, control_plane, control_plane::WaitPolicy, harness, sessions};
 
 use super::protocol::{
-    DaemonInfo, DirectoryParams, ExecutionEnsureParams, GithubLoginParams, JSON_RPC_VERSION, LoginParams, METHOD_APPLY,
-    METHOD_AUTH_LOGIN, METHOD_AUTH_STATUS, METHOD_CONVERGE, METHOD_DELETE, METHOD_EXECUTION_ENSURE, METHOD_GET,
-    METHOD_GITHUB_LOGIN, METHOD_HEALTH, METHOD_LIST, METHOD_PROGRESS, METHOD_RESOLVE_DIRECTORY, METHOD_RESOURCES_WATCH,
-    METHOD_SESSION_ARCHIVE, METHOD_SESSION_DELETE, METHOD_SESSION_ENSURE, METHOD_SESSION_GET, METHOD_SESSION_LIST,
-    METHOD_SESSION_PROMPT, METHOD_SESSION_TURNS, METHOD_SESSION_UNARCHIVE, METHOD_SHUTDOWN, METHOD_SSH_ACCESS,
-    METHOD_START, METHOD_STOP, METHOD_VNC_ACCESS, NameParams, ProgressParams, ReadMessage, Request,
-    ResourcesWatchParams, Response, SessionEnsureParams, SessionListParams, SessionParams, SessionPromptParams,
-    SessionTurnsParams, ShutdownParams, ShutdownResult, read_message,
+    DaemonInfo, DirectoryParams, ExecutionEnsureParams, GithubCheckParams, GithubLoginParams, JSON_RPC_VERSION,
+    LoginParams, METHOD_APPLY, METHOD_AUTH_LOGIN, METHOD_AUTH_STATUS, METHOD_CONVERGE, METHOD_DELETE,
+    METHOD_EXECUTION_ENSURE, METHOD_GET, METHOD_GITHUB_CHECK, METHOD_GITHUB_LOGIN, METHOD_HEALTH, METHOD_LIST,
+    METHOD_PROGRESS, METHOD_RESOLVE_DIRECTORY, METHOD_RESOURCES_WATCH, METHOD_SESSION_ARCHIVE, METHOD_SESSION_DELETE,
+    METHOD_SESSION_ENSURE, METHOD_SESSION_GET, METHOD_SESSION_LIST, METHOD_SESSION_PROMPT, METHOD_SESSION_TURNS,
+    METHOD_SESSION_UNARCHIVE, METHOD_SHUTDOWN, METHOD_SSH_ACCESS, METHOD_START, METHOD_STOP, METHOD_VNC_ACCESS,
+    NameParams, ProgressParams, ReadMessage, Request, ResourcesWatchParams, Response, SessionEnsureParams,
+    SessionListParams, SessionParams, SessionPromptParams, SessionTurnsParams, ShutdownParams, ShutdownResult,
+    read_message,
 };
 
 /// A byte stream usable by the Agent Control API client.
@@ -288,13 +289,32 @@ impl Client {
         self.call(METHOD_AUTH_STATUS, serde_json::json!({})).await
     }
 
-    /// Stores the GitHub token Agents with the GitHub account use, returning its account.
+    /// Stores a GitHub token for Agents of `owner`, or for every owner without one of its own.
     ///
     /// # Errors
     ///
     /// Returns an error when GitHub rejects the token or cannot be reached, or it cannot be persisted.
-    pub async fn github_login(&self, token: String) -> Result<crate::github::GithubAccount, Error> {
-        self.call(METHOD_GITHUB_LOGIN, GithubLoginParams { token }).await
+    pub async fn github_login(
+        &self,
+        token: String,
+        owner: Option<String>,
+    ) -> Result<crate::github::GithubToken, Error> {
+        self.call(METHOD_GITHUB_LOGIN, GithubLoginParams { token, owner }).await
+    }
+
+    /// Asks GitHub, through the daemon, about the stored token an Agent of `owner` would use and
+    /// whether it can see `repository`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no stored token applies, or GitHub rejects it or cannot be reached.
+    pub async fn github_check(
+        &self,
+        owner: Option<String>,
+        repository: Option<crate::github::Repository>,
+    ) -> Result<crate::github::GithubCheck, Error> {
+        self.call(METHOD_GITHUB_CHECK, GithubCheckParams { owner, repository })
+            .await
     }
 
     /// Creates or resolves one named session attach target.

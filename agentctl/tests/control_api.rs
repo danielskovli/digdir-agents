@@ -128,24 +128,57 @@ fn answered_turn(prompt: &str, answer: &str) -> agent::sessions::Turn {
     }
 }
 
+fn fake_github_token(token: &str, owner: Option<&str>) -> agent::github::GithubToken {
+    agent::github::GithubToken {
+        owner: owner.map(str::to_owned),
+        account: agent::github::GithubAccount {
+            login: token
+                .trim_start_matches("ghp_")
+                .trim_start_matches("github_pat_")
+                .into(),
+            name: "Bot".into(),
+            email: "bot@example.com".into(),
+        },
+        kind: agent::github::TokenKind::of(token),
+        expires_at: None,
+    }
+}
+
 impl AuthenticationApi for FakeAuthentication {
     fn status(&self) -> LocalFuture<'_, Result<agent::harness::AuthenticationStatus, Error>> {
         Box::pin(async {
             Ok(agent::harness::AuthenticationStatus {
                 claude_code: true,
                 codex: false,
-                github: None,
+                github: Vec::new(),
             })
         })
     }
 
-    fn github_login<'a>(&'a self, token: &'a str) -> LocalFuture<'a, Result<agent::github::GithubAccount, Error>> {
+    fn github_login<'a>(
+        &'a self,
+        token: &'a str,
+        owner: Option<&'a str>,
+    ) -> LocalFuture<'a, Result<agent::github::GithubToken, Error>> {
+        Box::pin(async move { Ok(fake_github_token(token, owner)) })
+    }
+
+    fn github_check<'a>(
+        &'a self,
+        owner: Option<&'a str>,
+        repository: Option<&'a agent::github::Repository>,
+    ) -> LocalFuture<'a, Result<agent::github::GithubCheck, Error>> {
         Box::pin(async move {
-            Ok(agent::github::GithubAccount {
-                login: token.trim_start_matches("ghp_").into(),
-                name: "Bot".into(),
-                email: "bot@example.com".into(),
-                missing_scopes: Vec::new(),
+            let token = fake_github_token("github_pat_digdir-bot", owner);
+            Ok(agent::github::GithubCheck {
+                inspection: agent::github::Inspection {
+                    account: token.account.clone(),
+                    kind: token.kind,
+                    expires_at: None,
+                    missing_scopes: Vec::new(),
+                    repository: repository.map(|repository| (repository.clone(), true)),
+                },
+                token,
             })
         })
     }
@@ -1175,20 +1208,30 @@ async fn unix_socket_transport_is_private_and_usable() {
 }
 
 #[tokio::test(flavor = "local")]
-async fn the_github_login_and_authentication_status_round_trip() {
+async fn the_github_login_check_and_authentication_status_round_trip() {
     let fixture = api();
 
-    let account = fixture
+    let token = fixture
         .client
-        .github_login("ghp_digdir-bot".into())
+        .github_login("github_pat_digdir-bot".into(), Some("digdir".into()))
         .await
         .expect("GitHub login");
-    assert_eq!(account.login, "digdir-bot");
-    assert_eq!(account.email, "bot@example.com");
+    assert_eq!(token.account.login, "digdir-bot");
+    assert_eq!(token.owner.as_deref(), Some("digdir"));
+    assert_eq!(token.kind, agent::github::TokenKind::FineGrained);
+
+    let repository = agent::github::Repository::new("digdir", "agents");
+    let check = fixture
+        .client
+        .github_check(Some("digdir".into()), Some(repository.clone()))
+        .await
+        .expect("GitHub check");
+    assert_eq!(check.token.owner.as_deref(), Some("digdir"));
+    assert_eq!(check.inspection.repository, Some((repository, true)));
 
     let status = fixture.client.auth_status().await.expect("status");
     assert!(status.claude_code);
     assert!(!status.codex);
     assert!(status.any_harness());
-    assert_eq!(status.github, None);
+    assert!(status.github.is_empty());
 }
