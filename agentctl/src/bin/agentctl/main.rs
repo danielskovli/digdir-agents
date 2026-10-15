@@ -1897,10 +1897,11 @@ async fn status(client: &Client) -> CommandResult<()> {
     let directory = std::env::current_dir().map_err(Error::from)?;
     let here = match client.resolve_agent_variant(directory, None).await {
         Ok(agent) => {
-            let ready = agent
-                .status
-                .ready_condition()
-                .map_or("Pending", |condition| condition.reason.as_str());
+            let ready = match agent.status.ready_condition() {
+                Some(condition) if condition.status == agent::ConditionStatus::True => "Ready",
+                Some(condition) => condition.reason.as_str(),
+                None => "Pending",
+            };
             let sessions = client.list_sessions(Some(&agent.metadata.name)).await?.len();
             format!(
                 "{}, {ready}, {sessions} session{}",
