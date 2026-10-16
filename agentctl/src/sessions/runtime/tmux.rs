@@ -38,8 +38,30 @@ const DETACH_KEYS: &str = "ctrl-b,d";
 // own harness pane (a pane started with a command). It is bound on the shared tmux server,
 // so the guard is scoped to agent-session-* names; every other pane, including a shell
 // opened with Ctrl-b c, keeps normal job control and has Ctrl-Z forwarded.
+// The status bar names the session as people know it and keeps the keys a newcomer forgets in
+// view.
 fn terminal_options() -> Vec<String> {
     [
+        "set-option",
+        "-g",
+        "status-left",
+        "[#{?@agent_session_name,#{@agent_session_name},#S}] ",
+        ";",
+        "set-option",
+        "-g",
+        "status-left-length",
+        "40",
+        ";",
+        "set-option",
+        "-g",
+        "status-right",
+        "Ctrl-b d detach · Ctrl-b c shell · Ctrl-b n next ",
+        ";",
+        "set-option",
+        "-g",
+        "status-right-length",
+        "60",
+        ";",
         "set-option",
         "-g",
         "history-limit",
@@ -106,6 +128,9 @@ const STOP_SCRIPT: &str = include_str!("stop.sh");
 /// attaches to one, so a person or harness in the Sandbox needs no session ids.
 const SESSION_HELPER: &str = "/usr/local/bin/agent-session";
 const SESSION_HELPER_SCRIPT: &str = include_str!("agent-session.sh");
+/// Reminds interactive login shells in the Sandbox how sessions and tmux work.
+const WELCOME: &str = "/etc/profile.d/agent-session.sh";
+const WELCOME_SCRIPT: &str = include_str!("welcome.sh");
 /// The tmux user option holding a session's name, which `agent-session` lists.
 const SESSION_NAME_OPTION: &str = "@agent_session_name";
 
@@ -280,37 +305,40 @@ fn launch_arguments(
         ";".into(),
         "set-option".into(),
         "-t".into(),
-        exact_target(session),
+        pane_target(session),
         SESSION_NAME_OPTION.into(),
         session.name.to_string(),
     ]);
     arguments
 }
 
-/// Installs `agent-session`, rewriting it only when this release's script differs.
-async fn install_session_helper(sandbox: &SandboxHandle) -> Result<(), Error> {
-    if !crate::sandbox::platform::files::write_if_changed(sandbox, SESSION_HELPER, SESSION_HELPER_SCRIPT.as_bytes())
-        .await?
-    {
-        return Ok(());
+/// Installs `agent-session` and the login-shell reminder, rewriting each only when this
+/// release's script differs.
+async fn install_session_helpers(sandbox: &SandboxHandle) -> Result<(), Error> {
+    for (path, contents, mode) in [
+        (SESSION_HELPER, SESSION_HELPER_SCRIPT, "0755"),
+        (WELCOME, WELCOME_SCRIPT, "0644"),
+    ] {
+        if !crate::sandbox::platform::files::write_if_changed(sandbox, path, contents.as_bytes()).await? {
+            continue;
+        }
+        let changed_mode = run_lifecycle_execution(
+            sandbox,
+            ExecutionSpec::command(
+                SandboxPath::new("/usr/bin/sudo"),
+                ["-n", "/bin/chmod", mode, path].map(str::to_owned),
+            ),
+            "session helper installation",
+        )
+        .await?;
+        if !changed_mode.status.success() {
+            return Err(Error::Session(format!(
+                "could not set the mode of {path}: exit code {}",
+                changed_mode.status.code
+            )));
+        }
     }
-    let made_executable = run_lifecycle_execution(
-        sandbox,
-        ExecutionSpec::command(
-            SandboxPath::new("/usr/bin/sudo"),
-            ["-n", "/bin/chmod", "0755", SESSION_HELPER].map(str::to_owned),
-        ),
-        "agent-session installation",
-    )
-    .await?;
-    if made_executable.status.success() {
-        Ok(())
-    } else {
-        Err(Error::Session(format!(
-            "could not make {SESSION_HELPER} executable: exit code {}",
-            made_executable.status.code
-        )))
-    }
+    Ok(())
 }
 
 /// Creates the named detached tmux session running the harness.
@@ -322,7 +350,7 @@ async fn launch(
     resume: Option<&str>,
     initial_message: Option<&str>,
 ) -> Result<(), Error> {
-    install_session_helper(sandbox).await?;
+    install_session_helpers(sandbox).await?;
     let arguments = launch_arguments(session, context, token, resume, initial_message);
     let created = run_lifecycle_execution(
         sandbox,
@@ -744,7 +772,7 @@ mod tests {
                 ";",
                 "set-option",
                 "-t",
-                "=agent-session-dd4cdbaf-9ea0-477e-96dd-bbd6b1e4f7dc",
+                "=agent-session-dd4cdbaf-9ea0-477e-96dd-bbd6b1e4f7dc:",
                 "@agent_session_name",
                 "review"
             ],
@@ -787,6 +815,36 @@ mod tests {
             .expect("agent-session");
         let log = std::fs::read_to_string(&log).unwrap_or_default();
         (output, log)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_login_reminder_differs_inside_tmux_and_stays_silent_when_not_interactive() {
+        let run = |shell_flags: &str, tmux: Option<&str>| {
+            let mut command = std::process::Command::new("/bin/sh");
+            command
+                .args([shell_flags, ". \"$0\"; echo sourced"])
+                .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sessions/runtime/welcome.sh"))
+                .env_remove("TMUX")
+                .stdin(std::process::Stdio::null());
+            if let Some(tmux) = tmux {
+                command.env("TMUX", tmux);
+            }
+            let output = command.output().expect("sh");
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        let outside = run("-ic", None);
+        assert!(
+            outside.contains("agent-session NAME") && outside.contains("Ctrl-b d"),
+            "{outside}"
+        );
+        let inside = run("-ic", Some("/tmp/tmux-1/default,1,0"));
+        assert!(
+            inside.contains("tmux window beside") && !inside.contains("agent-session"),
+            "{inside}"
+        );
+        assert_eq!(run("-c", None), "sourced\n", "a script's shell prints nothing");
     }
 
     #[cfg(unix)]
