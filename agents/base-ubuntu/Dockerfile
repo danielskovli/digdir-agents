@@ -8,6 +8,11 @@
 #
 # `agentctl init` copies the stages up to the one an agent needs into the agent's own Dockerfile,
 # with the files they copy from common/, and adds the repository's toolchains in a last stage.
+#
+# TODO: Nothing pulls the published image yet. .github/workflows/agentctl-base-image.yml publishes
+# `basic` from upstream main only, so until that first run there is nothing to pull, and Dockerfiles
+# that `agentctl init` writes carry these stages themselves. Once it is published, verify pulling it
+# end to end, then make init's Dockerfiles start FROM the published image.
 
 FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b AS basic
 

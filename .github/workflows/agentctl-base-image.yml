@@ -1,7 +1,7 @@
 # Builds the general Agent base image, the `basic` stage of agents/base-ubuntu, whose stages `agentctl init` copies into
 # the Dockerfiles it writes.
 # Pull requests only build it; main, including a manual run on main, also publishes it to GHCR as `latest` and
-# `sha-<commit>`.
+# `sha-<commit>`. Nothing pulls it yet; see the TODO at the top of agents/base-ubuntu/Dockerfile.
 name: agentctl base image
 
 on:
