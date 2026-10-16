@@ -604,7 +604,7 @@ async fn without_command(home: &ControlPlaneHome, client: &Client) -> CommandRes
             }
         }
         Err(Error::Rpc(error)) if error.is_not_found() => {
-            if prompt::confirm("No agent was set up for this directory. Set one up now?")? {
+            if prompt::confirm(&set_up_question())? {
                 if let Some(name) = Box::pin(init::run(home, client)).await?
                     && prompt::confirm(&format!("Open a session on {name} now?"))?
                 {
@@ -617,6 +617,25 @@ async fn without_command(home: &ControlPlaneHome, client: &Client) -> CommandRes
     }
     Arguments::command().print_help().map_err(Error::from)?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// What to ask when the current directory has no agent: to create one from the manifest already
+/// here, or to set one up from scratch.
+fn set_up_question() -> String {
+    let manifest = std::env::current_dir()
+        .ok()
+        .map(|directory| tui::working_tree_manifests(&directory))
+        .and_then(|manifests| manifests.into_iter().next());
+    manifest.map_or_else(
+        || "No agent was set up for this directory. Set one up now?".to_owned(),
+        |manifest| {
+            let name = manifest.file_name().map_or_else(
+                || manifest.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            format!("{name} is here, but no agent runs from it. Create one now?")
+        },
+    )
 }
 
 /// Offers `agentctl init` before a command that would use the current directory's Agent finds
@@ -634,7 +653,7 @@ async fn offer_init_if_missing(
     let directory = std::env::current_dir().map_err(Error::from)?;
     if let Err(Error::Rpc(error)) = client.resolve_agent_variant(directory, None).await
         && error.is_not_found()
-        && prompt::confirm("No agent was set up for this directory. Set one up now?")?
+        && prompt::confirm(&set_up_question())?
     {
         return Box::pin(init::run(home, client)).await;
     }
