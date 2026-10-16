@@ -17,7 +17,7 @@ use crate::{
     sandbox::platform::{PORTABLE_TERMINAL, UTF8_LOCALE},
 };
 
-use super::Observation;
+use super::{LaunchContext, Observation};
 use crate::sessions::{Activity, AttachTarget, LaunchToken, LifecycleState, Phase, Session, Turn};
 
 /// Quiet period after the latest hook event before input is pasted into a
@@ -101,6 +101,13 @@ const OBSERVE_SCRIPT: &str = include_str!("observe.sh");
 // Stopping is repeated after an interrupted release, so a Session that is
 // already gone counts as stopped.
 const STOP_SCRIPT: &str = include_str!("stop.sh");
+
+/// `agent-session`, on every Sandbox user's `PATH`: lists the agent's sessions by name and
+/// attaches to one, so a person or harness in the Sandbox needs no session ids.
+const SESSION_HELPER: &str = "/usr/local/bin/agent-session";
+const SESSION_HELPER_SCRIPT: &str = include_str!("agent-session.sh");
+/// The tmux user option holding a session's name, which `agent-session` lists.
+const SESSION_NAME_OPTION: &str = "@agent_session_name";
 
 /// Observes attachment and the freshest terminal or transcript activity.
 async fn observe(session: &Session, sandbox: &SandboxHandle) -> Result<Observation, Error> {
@@ -219,9 +226,11 @@ async fn run_lifecycle_execution(
 /// Unix identity and tmux server, so this is not a security boundary between
 /// sibling Sessions; the token only rejects stale or accidental reports. The
 /// Session's recorded model selection is part of every launch, resumed or not.
+/// The harness also learns its agent, session name, host and source directory,
+/// so it can say where it runs.
 fn launch_arguments(
     session: &Session,
-    platform_api_url: &str,
+    context: LaunchContext<'_>,
     token: &LaunchToken,
     resume: Option<&str>,
     initial_message: Option<&str>,
@@ -240,6 +249,13 @@ fn launch_arguments(
     let session_environment = launch.environment.iter().cloned().chain([
         ("CONTAINER_HOST".into(), crate::sandbox::platform::CONTAINER_HOST.into()),
         ("AGENT_SESSION_ID".into(), session.id.to_string()),
+        ("AGENT_NAME".into(), context.agent.to_owned()),
+        ("AGENT_SESSION_NAME".into(), session.name.to_string()),
+        ("AGENT_HOST".into(), context.host.to_owned()),
+        (
+            "AGENT_SOURCE_DIRECTORY".into(),
+            context.source_directory.display().to_string(),
+        ),
         ("AGENT_SESSION_TOKEN".into(), token.expose()),
         // TODO: Remove in the release after the first one with `PLATFORM_API_URL_FILE`, with
         // agentd's removal of `platform-api-port`. Hook scripts installed by earlier releases
@@ -248,7 +264,11 @@ fn launch_arguments(
         // upgrade that skips that release loses such a relaunch's reports until setup completes.
         (
             "AGENT_SESSION_HOOK_URL".into(),
-            format!("{platform_api_url}{}", crate::platform_api::SESSION_HOOKS_PATH),
+            format!(
+                "{}{}",
+                context.platform_api_url,
+                crate::platform_api::SESSION_HOOKS_PATH
+            ),
         ),
     ]);
     for (name, value) in session_environment {
@@ -256,19 +276,54 @@ fn launch_arguments(
         arguments.push(format!("{name}={value}"));
     }
     arguments.push(launch.command);
+    arguments.extend([
+        ";".into(),
+        "set-option".into(),
+        "-t".into(),
+        exact_target(session),
+        SESSION_NAME_OPTION.into(),
+        session.name.to_string(),
+    ]);
     arguments
+}
+
+/// Installs `agent-session`, rewriting it only when this release's script differs.
+async fn install_session_helper(sandbox: &SandboxHandle) -> Result<(), Error> {
+    if !crate::sandbox::platform::files::write_if_changed(sandbox, SESSION_HELPER, SESSION_HELPER_SCRIPT.as_bytes())
+        .await?
+    {
+        return Ok(());
+    }
+    let made_executable = run_lifecycle_execution(
+        sandbox,
+        ExecutionSpec::command(
+            SandboxPath::new("/usr/bin/sudo"),
+            ["-n", "/bin/chmod", "0755", SESSION_HELPER].map(str::to_owned),
+        ),
+        "agent-session installation",
+    )
+    .await?;
+    if made_executable.status.success() {
+        Ok(())
+    } else {
+        Err(Error::Session(format!(
+            "could not make {SESSION_HELPER} executable: exit code {}",
+            made_executable.status.code
+        )))
+    }
 }
 
 /// Creates the named detached tmux session running the harness.
 async fn launch(
     session: &Session,
     sandbox: &SandboxHandle,
-    platform_api_url: &str,
+    context: LaunchContext<'_>,
     token: &LaunchToken,
     resume: Option<&str>,
     initial_message: Option<&str>,
 ) -> Result<(), Error> {
-    let arguments = launch_arguments(session, platform_api_url, token, resume, initial_message);
+    install_session_helper(sandbox).await?;
+    let arguments = launch_arguments(session, context, token, resume, initial_message);
     let created = run_lifecycle_execution(
         sandbox,
         ExecutionSpec::command(SandboxPath::new("/usr/bin/tmux"), arguments)
@@ -369,19 +424,12 @@ impl super::SessionRuntime for Tmux {
         &'a self,
         session: &'a Session,
         sandbox: &'a SandboxHandle,
-        platform_api_url: &'a str,
+        context: LaunchContext<'a>,
         token: &'a LaunchToken,
         resume: Option<&'a str>,
         initial_prompt: Option<&'a str>,
     ) -> ::sandbox::LocalFuture<'a, Result<(), Error>> {
-        Box::pin(launch(
-            session,
-            sandbox,
-            platform_api_url,
-            token,
-            resume,
-            initial_prompt,
-        ))
+        Box::pin(launch(session, sandbox, context, token, resume, initial_prompt))
     }
 
     fn stop<'a>(
@@ -636,6 +684,141 @@ mod tests {
     };
 
     use super::{Observation, input_ready_in, parse_transcript_suffix};
+
+    fn named_session() -> crate::sessions::Session {
+        crate::sessions::Session {
+            id: "dd4cdbaf-9ea0-477e-96dd-bbd6b1e4f7dc".parse().expect("Session ID"),
+            agent_id: "38f41de4-6ff7-4679-ae46-678bc61e4dcb".parse().expect("Agent ID"),
+            agent: "worker".into(),
+            name: "review".to_string().try_into().expect("Session name"),
+            harness: harness::test_harness(),
+            model_selection: crate::ModelSelection::default(),
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            deletion_timestamp: None,
+            archived_at: None,
+            status: crate::sessions::Status::new(
+                crate::sessions::Lifecycle::running(),
+                crate::sessions::Reported::default(),
+            ),
+            activation_generation: 0,
+            observed_activation_generation: 0,
+        }
+    }
+
+    #[test]
+    fn a_launch_tells_the_harness_where_it_runs_and_labels_the_session_with_its_name() {
+        let session = named_session();
+        let arguments = super::launch_arguments(
+            &session,
+            super::LaunchContext {
+                platform_api_url: "http://platform",
+                agent: "worker",
+                source_directory: std::path::Path::new("/Users/someone/code/app"),
+                host: "laptop",
+            },
+            &crate::sessions::LaunchToken::generate(),
+            None,
+            None,
+        );
+        let new_session = arguments
+            .iter()
+            .position(|argument| argument == "new-session")
+            .expect("new-session");
+        let environment: Vec<&str> = arguments[new_session..]
+            .windows(2)
+            .filter(|pair| pair[0] == "-e")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        for expected in [
+            "AGENT_NAME=worker",
+            "AGENT_SESSION_NAME=review",
+            "AGENT_HOST=laptop",
+            "AGENT_SOURCE_DIRECTORY=/Users/someone/code/app",
+            "AGENT_SESSION_ID=dd4cdbaf-9ea0-477e-96dd-bbd6b1e4f7dc",
+        ] {
+            assert!(environment.contains(&expected), "{expected} in {environment:?}");
+        }
+        assert_eq!(
+            arguments[arguments.len() - 6..],
+            [
+                ";",
+                "set-option",
+                "-t",
+                "=agent-session-dd4cdbaf-9ea0-477e-96dd-bbd6b1e4f7dc",
+                "@agent_session_name",
+                "review"
+            ],
+            "the label is set on the new session, after its command: {arguments:?}"
+        );
+    }
+
+    /// Runs `agent-session` against a stand-in tmux that knows two labelled sessions and one
+    /// unlabelled one, and records how it was run.
+    #[cfg(unix)]
+    fn run_session_helper(arguments: &[&str], environment: &[(&str, &str)]) -> (std::process::Output, String) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let tmux = directory.path().join("tmux");
+        let log = directory.path().join("log");
+        std::fs::write(
+            &tmux,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\n\
+                 [ \"$1\" = list-sessions ] && printf 'review\\tagent-session-1\\n\\tother\\ns1\\tagent-session-2\\n'\n\
+                 exit 0\n",
+                log.display()
+            ),
+        )
+        .expect("fake tmux");
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).expect("executable");
+        let helper = directory.path().join("agent-session");
+        std::fs::write(
+            &helper,
+            super::SESSION_HELPER_SCRIPT.replace("/usr/bin/tmux", &tmux.display().to_string()),
+        )
+        .expect("helper");
+        let output = std::process::Command::new("/bin/sh")
+            .arg(&helper)
+            .args(arguments)
+            .env_remove("TMUX")
+            .envs(environment.iter().copied())
+            .output()
+            .expect("agent-session");
+        let log = std::fs::read_to_string(&log).unwrap_or_default();
+        (output, log)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_session_lists_named_sessions_and_attaches_by_name() {
+        let (listed, _) = run_session_helper(
+            &[],
+            &[
+                ("AGENT_NAME", "worker"),
+                ("AGENT_HOST", "laptop"),
+                ("AGENT_SESSION_NAME", "s1"),
+            ],
+        );
+        assert!(listed.status.success(), "{listed:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&listed.stdout),
+            "agent: worker on laptop\n  review\n* s1 (this session)\n"
+        );
+
+        let (attached, log) = run_session_helper(&["s1"], &[]);
+        assert!(attached.status.success(), "{attached:?}");
+        assert!(log.ends_with("attach-session -t =agent-session-2\n"), "{log}");
+
+        let (switched, log) = run_session_helper(&["review"], &[("TMUX", "/tmp/tmux-1/default,1,0")]);
+        assert!(switched.status.success(), "{switched:?}");
+        assert!(log.ends_with("switch-client -t =agent-session-1\n"), "{log}");
+
+        let (missing, log) = run_session_helper(&["other"], &[]);
+        assert!(!missing.status.success());
+        assert!(String::from_utf8_lossy(&missing.stderr).contains("no session named other"));
+        assert!(!log.contains("attach"), "{log}");
+    }
 
     #[test]
     fn a_truncated_suffix_starts_at_the_first_complete_turn() {
