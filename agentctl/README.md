@@ -39,8 +39,9 @@ resources, mounts and access cannot change once the agent exists. `agentctl stat
 and the current directory's agent at a glance, and `agentctl claude status` and `agentctl codex status` exit with 1
 when that login is missing.
 
-The agent directory is `agents/<repository>/` at the repository root, laid out like the Agents in this repository and
-in altinn-studio:
+`init` asks what kind of agent it is, such as `dev` or `minimal`, and writes `agents/<kind>/` at the repository root,
+naming the agent `<repository>-<kind>` and laying the directory out like the Agents in this repository and in
+altinn-studio:
 
 | File | What it is |
 | --- | --- |

@@ -44,7 +44,7 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client, confirmed: boo
         let Some(manifest) = write_agent_directory(home, &directory, &github, &status, confirmed)? else {
             return Ok(None);
         };
-        create_from(client, &manifest).await?
+        create_written(client, &manifest).await?
     } else {
         let manifests = crate::tui::working_tree_manifests(&directory);
         if let [manifest] = manifests.as_slice() {
@@ -78,27 +78,19 @@ fn write_agent_directory(
     let root = crate::tui::repository_root(directory)
         .unwrap_or(directory)
         .to_path_buf();
-    let name = agent_name(&root);
-    let folder = root.join(template::AGENTS_DIRECTORY).join(&name);
-    if folder.exists() {
-        // Discovery honours ignore files, so an ignored manifest is not offered; never replace it.
-        return Err(Error::Invalid(format!(
-            "{} exists but Git offers no agent manifest in it; create the agent with `agentctl apply -f` or move it aside",
-            folder.display()
-        )));
-    }
-    if confirmed {
-        eprintln!("\nThe agent's files go in {}.", folder.display());
-    } else if !prompt::confirm(&format!("No agent here. Set one up in {}?", folder.display()))? {
+    if !confirmed && !prompt::confirm("No agent here. Set one up?")? {
         return Ok(None);
     }
+    let repository = agent_name(&root);
+    let (kind, folder) = choose_kind(&root, &repository)?;
+    let name = qualified_name(&repository, &kind);
     let toolchains = toolchains::detect(&root);
     let image = choose_image(&toolchains)?;
     let (checkout, worktree) = choose_checkout(&root, image)?;
     let size = choose_size(home.path())?;
     let workspace = match &checkout {
-        Checkout::Clone(repository) => repository_directory(repository).unwrap_or_else(|| name.clone()),
-        Checkout::Mount => name.clone(),
+        Checkout::Clone(remote) => repository_directory(remote).unwrap_or(repository),
+        Checkout::Mount => repository,
     };
     let choices = Choices {
         name,
@@ -163,6 +155,60 @@ fn write_agent_directory(
         return Ok(None);
     }
     Ok(Some(chosen))
+}
+
+/// Asks what kind of agent this is, which names its directory under `agents/`, until the answer
+/// names a directory that does not exist yet.
+fn choose_kind(root: &Path, repository: &str) -> Result<(String, PathBuf), Error> {
+    let agents = root.join(template::AGENTS_DIRECTORY);
+    let suggestion = ["dev", "agent"]
+        .into_iter()
+        .find(|kind| !agents.join(kind).exists())
+        .map_or_else(|| "dev-2".to_owned(), str::to_owned);
+    loop {
+        let answer = prompt::ask_lines(&[
+            "What kind of agent is this?",
+            &format!(
+                "Its files go in {}/<kind>/ and it is named {repository}-<kind>,",
+                template::AGENTS_DIRECTORY
+            ),
+            "as altinn-studio has agents/minimal, agents/full and agents/desktop.",
+            &format!("Kind [{suggestion}]"),
+        ])?;
+        let kind = if answer.is_empty() {
+            suggestion.clone()
+        } else {
+            answer.to_lowercase()
+        };
+        if !is_kind(&kind) {
+            eprintln!("Use lowercase letters, digits and hyphens, starting with a letter or digit.");
+            continue;
+        }
+        let folder = agents.join(&kind);
+        if folder.exists() {
+            eprintln!("{} already exists; choose another kind.", folder.display());
+            continue;
+        }
+        return Ok((kind, folder));
+    }
+}
+
+fn is_kind(kind: &str) -> bool {
+    kind.starts_with(|character: char| character.is_ascii_alphanumeric())
+        && kind
+            .chars()
+            .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-')
+}
+
+/// The agent's name: the repository and the kind, as in `altinn-minimal`, or the kind alone when
+/// together they are too long for a name.
+fn qualified_name(repository: &str, kind: &str) -> String {
+    let qualified = format!("{repository}-{kind}");
+    if ::sandbox::SandboxName::new(qualified.clone()).is_ok() {
+        qualified
+    } else {
+        kind.to_owned()
+    }
 }
 
 /// The directory a clone of `repository` lands in: its last path segment without `.git`.
@@ -413,6 +459,22 @@ async fn offer_github_login(client: &Client, reason: Option<&str>) -> Github {
     }
 }
 
+/// Creates the agent from a manifest `init` just wrote, under its own name, or the first free
+/// numbered one when an agent already has it.
+async fn create_written(client: &Client, manifest: &Path) -> CommandResult<String> {
+    let manifest_name = agent::manifest::resolve(manifest)?.agent.metadata.name;
+    let agents = client.list_agents().await?;
+    let name = if agents.iter().any(|agent| agent.metadata.name == manifest_name) {
+        let numbered = crate::tui::numbered_name(&manifest_name, &agents);
+        eprintln!("An agent named {manifest_name} already exists, so this one is {numbered}.");
+        numbered
+    } else {
+        manifest_name
+    };
+    crate::tui::create_agent(client, manifest.to_path_buf(), name.clone(), None).await?;
+    Ok(name)
+}
+
 /// Creates the agent from the repository's only manifest, asking for its name with the manifest's
 /// own as the suggestion, or the first free numbered one when an agent already has it.
 async fn create_from(client: &Client, manifest: &Path) -> CommandResult<String> {
@@ -501,6 +563,19 @@ mod tests {
         assert_eq!(agent_name(Path::new("/src/_hidden_")), "hidden");
         assert_eq!(agent_name(Path::new("/")), "agent");
         assert_eq!(agent_name(Path::new("/src/---")), "agent");
+    }
+
+    #[test]
+    fn a_kind_names_a_directory_and_qualifies_the_agent_name() {
+        for kind in ["dev", "minimal", "full-2", "2nd"] {
+            assert!(is_kind(kind), "{kind}");
+        }
+        for kind in ["", "Dev", "-dev", "my agent", "a/b", "..", "dev_x"] {
+            assert!(!is_kind(kind), "{kind:?}");
+        }
+        assert_eq!(qualified_name("altinn", "minimal"), "altinn-minimal");
+        let long = "r".repeat(::sandbox::MAX_SANDBOX_NAME_BYTES);
+        assert_eq!(qualified_name(&long, "dev"), "dev", "too long together");
     }
 
     #[test]
