@@ -1,7 +1,7 @@
 //! `agentctl init`: sets up an Agent for the current directory.
 //!
-//! Asks for the host logins an Agent needs, writes an `agent.yaml` at the repository root when
-//! the working tree has none, and creates the Agent through the TUI's create form.
+//! Asks for the host logins an Agent needs, writes an agent directory under `agents/` when the
+//! working tree has no manifest, and creates the Agent.
 
 use std::path::{Path, PathBuf};
 
@@ -9,11 +9,13 @@ use agent::{Error, control_api::Client, harness::AuthenticationStatus, local::ho
 
 use crate::{CommandResult, prompt};
 
+mod image;
 mod sizing;
 mod template;
 mod toolchains;
 
-use template::{Checkout, Choices, Github, Image};
+use image::Tier;
+use template::{Checkout, Choices, Github};
 
 /// Sets up an Agent for the current directory, returning its name once it is Ready, or `None`
 /// when the user declined a step. `confirmed` says the person already agreed to set one up, so
@@ -84,10 +86,14 @@ fn write_agent_directory(
     let repository = agent_name(&root);
     let (kind, folder) = choose_kind(&root)?;
     let name = qualified_name(&repository, &kind);
+    let tier = choose_tier()?;
     let toolchains = toolchains::detect(&root);
-    let image = choose_image(&toolchains);
-    let (checkout, worktree) = choose_checkout(&root, image)?;
-    let size = choose_size(home.path())?;
+    if !toolchains.is_empty() {
+        let found: Vec<String> = toolchains.iter().map(toolchains::Toolchain::describe).collect();
+        eprintln!("\nThe agent also gets {}.", found.join(", "));
+    }
+    let (checkout, worktree) = choose_checkout(&root)?;
+    let size = choose_size(home.path(), tier.most())?;
     let workspace = match &checkout {
         Checkout::Clone(remote) => repository_directory(remote).unwrap_or(repository),
         Checkout::Mount => repository,
@@ -96,7 +102,7 @@ fn write_agent_directory(
         name,
         workspace,
         github: github.clone(),
-        image,
+        tier,
         checkout,
         size,
         skills: repository_skills(&root),
@@ -112,10 +118,12 @@ fn write_agent_directory(
         ));
     }
     let dockerfile = folder.join("Dockerfile");
-    if image == Image::Built {
-        written.push((dockerfile.clone(), template::dockerfile(&choices.checkout, &toolchains)));
-        written.push((folder.join(".dockerignore"), template::DOCKERIGNORE.to_owned()));
+    let dockerfile_text = template::dockerfile(tier, &choices.checkout, &toolchains);
+    for (path, contents) in image::support_files(&dockerfile_text) {
+        written.push((folder.join(image::SUPPORT_DIRECTORY).join(path), contents.to_owned()));
     }
+    written.push((dockerfile.clone(), dockerfile_text));
+    written.push((folder.join(".dockerignore"), template::DOCKERIGNORE.to_owned()));
     let instructions = folder.join("instructions.md");
     written.extend([
         (instructions.clone(), template::instructions(&choices)),
@@ -124,34 +132,29 @@ fn write_agent_directory(
         (folder.join("home").join(".gitkeep"), String::new()),
     ]);
     for (path, contents) in &written {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         write_new(path, contents)?;
     }
-    eprintln!("Wrote {}:", folder.display());
-    for (path, _) in &written {
-        if let Ok(relative) = path.strip_prefix(&folder) {
-            eprintln!("  {}", relative.display());
-        }
-    }
+    eprintln!("\nWrote the agent's files to {}.", folder.display());
     let chosen = if worktree {
         folder.join(template::WORKTREE_VARIANT)
     } else {
         manifest.clone()
     };
-    let mut editable = vec![manifest.as_path()];
-    if image == Image::Built {
-        editable.push(&dockerfile);
-    }
-    editable.push(&instructions);
-    let question = if image == Image::Built {
-        "Edit agent.yaml, the Dockerfile and instructions.md before creating the agent?"
-    } else {
-        "Edit agent.yaml and instructions.md before creating the agent?"
-    };
+    let editable = [manifest.as_path(), dockerfile.as_path(), instructions.as_path()];
     if prompt::confirm_lines(&[
         "The image, resources, mounts and access cannot change once the agent exists.",
-        question,
+        "Edit agent.yaml, the Dockerfile and instructions.md before creating the agent?",
     ])? && !edit_manifest(&chosen, &editable)?
     {
+        return Ok(None);
+    }
+    if !docker_running() {
+        eprintln!(
+            "\nDocker builds the agent's image, and it is not running here. Start Docker, then run `agentctl init` again."
+        );
         return Ok(None);
     }
     Ok(Some(chosen))
@@ -257,30 +260,31 @@ fn docker_running() -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// The image: one built here, which can add `toolchains` and clone the repository, whenever
-/// Docker runs, and the base image as it is otherwise.
-fn choose_image(toolchains: &[toolchains::Toolchain]) -> Image {
-    if !docker_running() {
-        eprintln!(
-            "\nDocker is not running, so the agent gets the standard image and works on this checkout. Start Docker \
-             first to give it this repository's tools."
-        );
-        return Image::Base;
-    }
-    if !toolchains.is_empty() {
-        let found: Vec<String> = toolchains.iter().map(toolchains::Toolchain::describe).collect();
-        eprintln!("\nThe agent gets {}.", found.join(", "));
-    }
-    Image::Built
+/// Asks what the agent should be able to do, which picks its image's stages.
+fn choose_tier() -> Result<Tier, Error> {
+    let recommended = Tier::Developer;
+    let options: Vec<String> = Tier::ALL
+        .iter()
+        .map(|tier| {
+            if *tier == recommended {
+                format!("{} (recommended)", tier.describe())
+            } else {
+                tier.describe().to_owned()
+            }
+        })
+        .collect();
+    let default = Tier::ALL.iter().position(|tier| *tier == recommended);
+    Ok(
+        prompt::choose("What should the agent be able to do?", &options, default)?
+            .and_then(|index| Tier::ALL.get(index).copied())
+            .unwrap_or(recommended),
+    )
 }
 
 /// Asks whether the agent clones the repository or works on this checkout, returning
 /// `agent.yaml`'s checkout and whether to create the agent from the worktree variant instead.
-/// Only a built image can clone, and only a repository with a remote can be cloned.
-fn choose_checkout(root: &Path, image: Image) -> Result<(Checkout, bool), Error> {
-    if image == Image::Base {
-        return Ok((Checkout::Mount, false));
-    }
+/// Only a repository with a remote can be cloned.
+fn choose_checkout(root: &Path) -> Result<(Checkout, bool), Error> {
     let Some(remote) = remote(root) else {
         eprintln!("This checkout has no remote to clone, so the agent works on it directly.");
         return Ok((Checkout::Mount, false));
@@ -314,20 +318,20 @@ fn remote(root: &Path) -> Option<String> {
     (output.status.success() && !url.is_empty()).then_some(url)
 }
 
-/// Asks for the agent's size, recommending one that fits this host and the free space beside
-/// agentd's state in `state`.
-fn choose_size(state: &Path) -> Result<sizing::Size, Error> {
+/// Asks for the agent's size, recommending one within `most` that fits this host and the free
+/// space beside agentd's state in `state`.
+fn choose_size(state: &Path, most: sizing::Size) -> Result<sizing::Size, Error> {
     let Some(host) = sizing::Host::measure(state) else {
         let size = sizing::Host {
             cpus: 4,
             memory_gib: 16,
             free_disk_gib: 32,
         }
-        .recommend();
+        .recommend(most);
         eprintln!("Could not measure this machine, so the agent gets {}.", size.describe());
         return Ok(size);
     };
-    let recommended = host.recommend();
+    let recommended = host.recommend(most);
     let mut lines = vec![
         "How large should the agent be?".to_owned(),
         format!(

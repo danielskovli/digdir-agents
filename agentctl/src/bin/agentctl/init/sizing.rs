@@ -7,12 +7,6 @@
 use std::path::Path;
 
 const GIB: u64 = 1024 * 1024 * 1024;
-/// The most a recommendation asks for, whatever the host has.
-const MOST: Size = Size {
-    cpus: 4,
-    memory_gib: 8,
-    disk_gib: 64,
-};
 /// The least disk a recommendation offers, enough for the base image's writes and a checkout.
 const LEAST_DISK_GIB: u64 = 16;
 /// Below this much free space, the recommendation comes with a warning.
@@ -70,12 +64,12 @@ impl Host {
     }
 
     /// Half of the host's cores, a quarter of its memory and half of its free disk, within
-    /// [`MOST`], and never less than one CPU, 2 GiB of memory or [`LEAST_DISK_GIB`] of disk.
-    pub(super) fn recommend(self) -> Size {
+    /// `most`, and never less than one CPU, 2 GiB of memory or [`LEAST_DISK_GIB`] of disk.
+    pub(super) fn recommend(self, most: Size) -> Size {
         Size {
-            cpus: (self.cpus / 2).clamp(1, MOST.cpus),
-            memory_gib: (self.memory_gib / 4).clamp(2, MOST.memory_gib),
-            disk_gib: (self.free_disk_gib / 2).clamp(LEAST_DISK_GIB, MOST.disk_gib),
+            cpus: (self.cpus / 2).clamp(1, most.cpus.max(1)),
+            memory_gib: (self.memory_gib / 4).clamp(2, most.memory_gib.max(2)),
+            disk_gib: (self.free_disk_gib / 2).clamp(LEAST_DISK_GIB, most.disk_gib.max(LEAST_DISK_GIB)),
         }
     }
 }
@@ -132,6 +126,12 @@ mod tests {
 
     use super::*;
 
+    const MOST: Size = Size {
+        cpus: 4,
+        memory_gib: 8,
+        disk_gib: 64,
+    };
+
     #[test]
     fn a_large_host_gets_the_usual_size_and_a_small_disk_caps_the_ceiling() {
         let roomy = Host {
@@ -139,7 +139,7 @@ mod tests {
             memory_gib: 64,
             free_disk_gib: 500,
         };
-        assert_eq!(roomy.recommend(), MOST);
+        assert_eq!(roomy.recommend(MOST), MOST);
 
         let laptop = Host {
             cpus: 10,
@@ -147,7 +147,7 @@ mod tests {
             free_disk_gib: 31,
         };
         assert_eq!(
-            laptop.recommend(),
+            laptop.recommend(MOST),
             Size {
                 cpus: 4,
                 memory_gib: 8,
@@ -160,7 +160,7 @@ mod tests {
             memory_gib: 16,
             free_disk_gib: 80,
         };
-        assert_eq!(half_full.recommend().disk_gib, 40, "half of the free space");
+        assert_eq!(half_full.recommend(MOST).disk_gib, 40, "half of the free space");
     }
 
     #[test]
@@ -171,7 +171,7 @@ mod tests {
             free_disk_gib: 3,
         };
         assert_eq!(
-            tiny.recommend(),
+            tiny.recommend(MOST),
             Size {
                 cpus: 1,
                 memory_gib: 2,
@@ -179,7 +179,7 @@ mod tests {
             }
         );
         assert_eq!(
-            tiny.recommend().smaller(),
+            tiny.recommend(MOST).smaller(),
             Size {
                 cpus: 1,
                 memory_gib: 2,

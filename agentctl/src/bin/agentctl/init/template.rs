@@ -3,11 +3,12 @@
 
 use agent::harness::AuthenticationStatus;
 
-use super::{sizing::Size, toolchains::Toolchain};
+use super::{
+    image::{self, Tier},
+    sizing::Size,
+    toolchains::Toolchain,
+};
 
-/// The published image every new agent starts from: the platform's Linux contract, both
-/// harnesses, Git and the GitHub CLI, and nothing specific to one project.
-pub(super) const BASE_IMAGE: &str = "ghcr.io/digdir/digdir-agents/agentctl-base-ubuntu:latest";
 /// The directory under the repository root that holds one directory per agent.
 pub(super) const AGENTS_DIRECTORY: &str = "agents";
 /// The variant of a cloning agent that works on the checkout instead.
@@ -27,15 +28,6 @@ pub(super) enum Github {
     Owner(String),
 }
 
-/// Which image a new manifest uses.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Image {
-    /// The agent directory's Dockerfile, built with Docker on this host from the base image.
-    Built,
-    /// The published base image as it is.
-    Base,
-}
-
 /// Where `agent.yaml`'s copy of the repository comes from.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Checkout {
@@ -53,7 +45,7 @@ pub(super) struct Choices {
     /// The directory under the agent's working directory that holds the repository.
     pub(super) workspace: String,
     pub(super) github: Github,
-    pub(super) image: Image,
+    pub(super) tier: Tier,
     pub(super) checkout: Checkout,
     pub(super) size: Size,
     /// The repository's own skill directories, relative to its root.
@@ -68,7 +60,7 @@ pub(super) fn manifest(choices: &Choices, status: &AuthenticationStatus) -> Stri
         name,
         workspace,
         github,
-        image,
+        tier,
         checkout,
         size,
         skills,
@@ -76,10 +68,16 @@ pub(super) fn manifest(choices: &Choices, status: &AuthenticationStatus) -> Stri
     let code = agent::sandbox::platform::WORKING_DIRECTORY;
     let harnesses = harnesses(status);
     let accounts = accounts(github);
-    let image = match image {
-        Image::Base => format!("    image:\n      type: reference\n      reference: {BASE_IMAGE}\n"),
-        Image::Built => "    # Built with Docker on this machine from Dockerfile, which starts from the published\n    # agentctl-base-ubuntu image.\n    image:\n      type: build\n      context: .\n      dockerfile: Dockerfile\n".to_owned(),
+    let access = if tier.has_desktop() {
+        "    # Opens the image's desktop to `agentctl vnc` and the TUI's open menu.\n    - type: vnc\n"
+    } else {
+        ""
     };
+    let tmp = tmp_mount(if tier.has_browser() {
+        "Build scratch space and the browser's shared memory, held in memory only as it is used."
+    } else {
+        "Build scratch space, held in memory only as it is used."
+    });
     let (about, checkout) = match checkout {
         Checkout::Clone(repository) => (
             format!(
@@ -109,7 +107,12 @@ metadata:
   name: {name}
 spec:
   sandbox:
-{image}    platform:
+    # Built with Docker on this machine from Dockerfile.
+    image:
+      type: build
+      context: .
+      dockerfile: Dockerfile
+    platform:
       os: linux
     resources:
       cpu: \"{cpus}\"
@@ -140,15 +143,14 @@ spec:
   #       - dev.azure.com
   access:
     - type: ssh
-  # All traffic goes through this machine's network mediator, and every host is allowed. To block
+{access}  # All traffic goes through this machine's network mediator, and every host is allowed. To block
   # some:
   # network:
   #   mode: mediated
   #   allow: all
   #   deny:
   #     - metadata.google.internal
-",
-        tmp = tmp_mount("Build scratch space, held in memory only as it is used.")
+"
     )
 }
 
@@ -274,10 +276,13 @@ pub(super) const DOCKERIGNORE: &str =
     "# The image's build context is this directory; only what the Dockerfile copies belongs in it.
 *
 !Dockerfile
+!common/
+!common/**
 ";
 
-/// A Dockerfile on the base image that clones `checkout` at boot and installs `toolchains`.
-pub(super) fn dockerfile(checkout: &Checkout, toolchains: &[Toolchain]) -> String {
+/// The agent's Dockerfile: the general stages up to `tier`'s, then a stage of its own that clones
+/// `checkout` at boot and installs `toolchains`.
+pub(super) fn dockerfile(tier: Tier, checkout: &Checkout, toolchains: &[Toolchain]) -> String {
     let code = agent::sandbox::platform::WORKING_DIRECTORY;
     let repositories = match checkout {
         Checkout::Clone(repository) => format!(
@@ -297,17 +302,19 @@ RUN printf '%s\\n' '{repository}' >/etc/agent/repositories
         .iter()
         .flat_map(|toolchain| ["\n".to_owned(), block(toolchain)])
         .collect();
+    let stage = tier.stage();
     format!(
-        "# Created by `agentctl init`: the image this repository's agent runs. It builds with Docker on
-# the machine that runs agentctl.
+        "# Created by `agentctl init`: the image this agent runs, built with Docker on the machine that
+# runs agentctl. An agent keeps the image it was created with, so to use changes, delete the agent
+# and create it again.
 #
-# It starts from the published base image, which has what an agent needs: systemd, OpenSSH, the
-# agent user, Claude Code, Codex, Node.js, Git and the GitHub CLI. Below are the toolchains found in
-# this repository; change their versions, remove what the agent does not need and add the rest. An
-# agent keeps the image it was created with, so to use changes, delete the agent and create it
-# again.
-FROM {BASE_IMAGE}
+# The first stages are general, from agentctl's base image (agents/base-ubuntu in digdir-agents),
+# and the files they copy are in {support}/. The last stage is this repository's: change its
+# toolchain versions, remove what the agent does not need and add the rest.
 
+{stages}
+# This repository's agent, on the {stage} stage.
+FROM {stage} AS agent
 USER root
 ARG TARGETARCH
 
@@ -319,7 +326,9 @@ ARG TARGETARCH
 
 USER agent
 WORKDIR {code}
-"
+",
+        support = image::SUPPORT_DIRECTORY,
+        stages = image::stages(tier)
     )
 }
 
@@ -470,12 +479,12 @@ mod tests {
         }
     }
 
-    fn choices(github: Github, image: Image, checkout: Checkout) -> Choices {
+    fn choices(github: Github, tier: Tier, checkout: Checkout) -> Choices {
         Choices {
             name: "worker".into(),
             workspace: "app".into(),
             github,
-            image,
+            tier,
             checkout,
             size: Size {
                 cpus: 2,
@@ -487,7 +496,7 @@ mod tests {
     }
 
     fn built() -> Choices {
-        choices(Github::None, Image::Built, Checkout::Clone("digdir/app".into()))
+        choices(Github::None, Tier::Developer, Checkout::Clone("digdir/app".into()))
     }
 
     fn decoded(text: &str) -> agent::Agent {
@@ -569,12 +578,12 @@ mod tests {
     #[test]
     fn the_github_owner_is_named_only_when_a_token_applies() {
         let owned = decoded(&manifest(
-            &choices(Github::Owner("digdir".into()), Image::Built, Checkout::Mount),
+            &choices(Github::Owner("digdir".into()), Tier::Developer, Checkout::Mount),
             &status(true, false),
         ));
         assert_eq!(owned.spec.github_owner(), Some("digdir"));
         let only = decoded(&manifest(
-            &choices(Github::Only, Image::Built, Checkout::Mount),
+            &choices(Github::Only, Tier::Developer, Checkout::Mount),
             &status(true, false),
         ));
         assert!(only.spec.github_account());
@@ -664,14 +673,33 @@ mod tests {
     #[test]
     fn a_mounted_checkout_is_bound_in_the_manifest_itself() {
         let mounted = decoded(&manifest(
-            &choices(Github::None, Image::Base, Checkout::Mount),
+            &choices(Github::None, Tier::Developer, Checkout::Mount),
             &status(true, false),
         ));
         assert!(
             matches!(mounted.spec.sandbox.mounts.as_slice(), [checkout, tmp] if checkout_mount(checkout) && tmp_mount(tmp))
         );
-        let image = serde_yaml_ng::to_value(&mounted.spec.sandbox.image).expect("image");
-        assert_eq!(image["reference"], BASE_IMAGE, "{image:?}");
+    }
+
+    #[test]
+    fn only_a_desktop_opens_vnc() {
+        let access = |tier: Tier| -> Vec<String> {
+            let agent = decoded(&manifest(
+                &choices(Github::None, tier, Checkout::Mount),
+                &status(true, false),
+            ));
+            let value = serde_yaml_ng::to_value(&agent.spec.access).expect("access");
+            value
+                .as_sequence()
+                .expect("a list")
+                .iter()
+                .map(|entry| entry["type"].as_str().unwrap_or_default().to_owned())
+                .collect()
+        };
+        assert_eq!(access(Tier::Desktop), ["ssh", "vnc"]);
+        for tier in [Tier::Basic, Tier::Developer, Tier::Web] {
+            assert_eq!(access(tier), ["ssh"], "{tier:?}");
+        }
     }
 
     #[test]
@@ -689,6 +717,23 @@ mod tests {
     }
 
     #[test]
+    fn the_build_context_keeps_the_dockerfile_and_support_files_and_nothing_else() {
+        // agentd reads .dockerignore with gitignore rules, matching each path or its parents.
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        std::fs::write(directory.path().join(".dockerignore"), DOCKERIGNORE).expect("dockerignore");
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(directory.path());
+        assert!(builder.add(directory.path().join(".dockerignore")).is_none());
+        let rules = builder.build().expect("rules");
+        let excluded = |path: &str| rules.matched_path_or_any_parents(path, false).is_ignore();
+        for kept in ["Dockerfile", "common/vnc.socket", "common/bin/desktop"] {
+            assert!(!excluded(kept), "{kept} is sent to the build");
+        }
+        for left_out in [".env", "agent.yaml", "home/.bashrc", "instructions.md"] {
+            assert!(excluded(left_out), "{left_out} stays out of the build");
+        }
+    }
+
+    #[test]
     fn the_instructions_name_where_the_repository_is() {
         let text = instructions(&built());
         assert!(text.starts_with("# worker\n"), "{text}");
@@ -701,6 +746,7 @@ mod tests {
     #[test]
     fn the_dockerfile_clones_the_repository_and_installs_each_toolchain() {
         let written = dockerfile(
+            Tier::Developer,
             &Checkout::Clone("digdir/worker".into()),
             &[
                 Toolchain::Node {
@@ -717,7 +763,8 @@ mod tests {
             ],
         );
         for expected in [
-            &format!("\nFROM {BASE_IMAGE}\n") as &str,
+            "\nFROM developer AS agent\n" as &str,
+            "FROM basic AS developer\n",
             "RUN printf '%s\\n' 'digdir/worker' >/etc/agent/repositories\n",
             "ARG NODE_RELEASE=release/latest-v20.x\n",
             "corepack enable",
@@ -736,7 +783,7 @@ mod tests {
             "{written}"
         );
 
-        let mounted = dockerfile(&Checkout::Mount, &[]);
+        let mounted = dockerfile(Tier::Basic, &Checkout::Mount, &[]);
         assert!(mounted.contains("# RUN printf"), "nothing is cloned: {mounted}");
         assert!(!mounted.contains("NODE_RELEASE"), "{mounted}");
     }
@@ -758,14 +805,14 @@ mod tests {
             Toolchain::Python,
             Toolchain::Java { maven: false },
         ];
-        let written = dockerfile(&Checkout::Clone("digdir/worker".into()), &all);
+        let written = dockerfile(Tier::Desktop, &Checkout::Clone("digdir/worker".into()), &all);
         let mut continued = false;
         for line in written.lines() {
             let trimmed = line.trim_start();
             if !continued && !trimmed.is_empty() && !trimmed.starts_with('#') {
                 let instruction = trimmed.split_whitespace().next().unwrap_or_default();
                 assert!(
-                    ["FROM", "USER", "ARG", "ENV", "RUN", "WORKDIR"].contains(&instruction),
+                    ["FROM", "USER", "ARG", "ENV", "RUN", "WORKDIR", "COPY", "ENTRYPOINT"].contains(&instruction),
                     "{line:?} neither starts an instruction nor continues one in\n{written}"
                 );
             }

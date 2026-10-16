@@ -47,13 +47,16 @@ altinn-studio:
 | --- | --- |
 | `agent.yaml` | The manifest, with every setting a person is likely to change later; those that do not apply yet are commented out |
 | `agent.worktree.yaml` | A variant of a cloning `agent.yaml` that works on this checkout through a read-write mount instead |
-| `Dockerfile` | Starts from the published [`agentctl-base-ubuntu`](../agents/base-ubuntu) image and installs each toolchain the repository declares, at the version it asks for: Node.js (`.nvmrc`, `engines`, Corepack for `packageManager`), .NET (`global.json`), Go (`go.mod`), Rust (`rust-toolchain.toml`), Python and Java. Docker on your machine builds it |
+| `Dockerfile`, `common/` | The general stages of [`agents/base-ubuntu`](../agents/base-ubuntu) up to the one chosen, with the files they copy, and a last stage that installs each toolchain the repository declares, at the version it asks for: Node.js (`.nvmrc`, `engines`, Corepack for `packageManager`), .NET (`global.json`), Go (`go.mod`), Rust (`rust-toolchain.toml`), Python and Java. Docker on your machine builds it |
 | `instructions.md` | The agent's own instructions, installed for every harness beside the checkout's `CLAUDE.md` or `AGENTS.md` |
 | `home/` | Files copied into `/home/agent`, such as dotfiles |
 | `.env.sample` | Example plain values and secrets for `.env`, which `.gitignore` keeps out of Git with `agent.mine.yaml` |
 
-The repository's own skills under `.claude/skills` are listed in the manifest, so every harness gets them. Without
-Docker the agent runs the base image as it is and always works on the checkout. The proposed size fits this machine:
+`init` asks what the agent should be able to do, which picks the image's last general stage and what the manifest
+gives it: writing code (`basic`), also building and running containers (`developer`, the default), also testing web
+apps in a headless browser (`web`), or also a desktop that `agentctl vnc` opens (`desktop`, with `access: vnc`). The
+repository's own skills under `.claude/skills` are listed in the manifest, so every harness gets them. Without Docker,
+`init` writes the files and asks for Docker to be started before it creates the agent. The proposed size fits this machine:
 up to 4 CPUs, 8 GiB of memory and a disk of at most half the free space on the volume holding `~/.agent`, since an
 agent's disk takes host space as the agent writes, up to its size. Edit the files like any others. `agentctl` on its own asks
 whether to open the current directory's Agent in `agentctl tui`, or to set one up when there is none, and prints the
