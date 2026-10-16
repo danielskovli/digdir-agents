@@ -16,13 +16,14 @@ mod toolchains;
 use template::{Checkout, Choices, Github, Image};
 
 /// Sets up an Agent for the current directory, returning its name once it is Ready, or `None`
-/// when the user declined a step.
+/// when the user declined a step. `confirmed` says the person already agreed to set one up, so
+/// writing the agent directory is announced rather than asked.
 ///
 /// # Errors
 ///
 /// Returns an error when there is no terminal to ask on, a login or apply fails, or the Agent
 /// does not become Ready.
-pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResult<Option<String>> {
+pub(crate) async fn run(home: &ControlPlaneHome, client: &Client, confirmed: bool) -> CommandResult<Option<String>> {
     if !prompt::interactive() {
         return Err(Error::Invalid("agentctl init needs an interactive terminal".into()).into());
     }
@@ -40,7 +41,7 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResu
     }
     let github = github_account(client, &status).await;
     let name = if crate::tui::working_tree_manifests(&directory).is_empty() {
-        let Some(manifest) = write_agent_directory(home, &directory, &github, &status)? else {
+        let Some(manifest) = write_agent_directory(home, &directory, &github, &status, confirmed)? else {
             return Ok(None);
         };
         create_from(client, &manifest).await?
@@ -72,6 +73,7 @@ fn write_agent_directory(
     directory: &Path,
     github: &Github,
     status: &AuthenticationStatus,
+    confirmed: bool,
 ) -> Result<Option<PathBuf>, Error> {
     let root = crate::tui::repository_root(directory)
         .unwrap_or(directory)
@@ -85,7 +87,9 @@ fn write_agent_directory(
             folder.display()
         )));
     }
-    if !prompt::confirm(&format!("No agent here. Set one up in {}?", folder.display()))? {
+    if confirmed {
+        eprintln!("\nThe agent's files go in {}.", folder.display());
+    } else if !prompt::confirm(&format!("No agent here. Set one up in {}?", folder.display()))? {
         return Ok(None);
     }
     let toolchains = toolchains::detect(&root);

@@ -605,7 +605,7 @@ async fn without_command(home: &ControlPlaneHome, client: &Client) -> CommandRes
         }
         Err(Error::Rpc(error)) if error.is_not_found() => {
             if prompt::confirm(&set_up_question())? {
-                if let Some(name) = Box::pin(init::run(home, client)).await?
+                if let Some(name) = Box::pin(init::run(home, client, true)).await?
                     && prompt::confirm(&format!("Open a session on {name} now?"))?
                 {
                     attach_new_session(home, client, &name).await?;
@@ -655,7 +655,7 @@ async fn offer_init_if_missing(
         && error.is_not_found()
         && prompt::confirm(&set_up_question())?
     {
-        return Box::pin(init::run(home, client)).await;
+        return Box::pin(init::run(home, client, true)).await;
     }
     Ok(None)
 }
@@ -720,7 +720,7 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
             command: GithubCommand::Reset { yes },
         } => github::reset(client, yes).await?,
         Command::Init => {
-            if let Some(name) = Box::pin(init::run(home, client)).await?
+            if let Some(name) = Box::pin(init::run(home, client, false)).await?
                 && prompt::confirm(&format!("Open a session on {name} now?"))?
             {
                 attach_new_session(home, client, &name).await?;
