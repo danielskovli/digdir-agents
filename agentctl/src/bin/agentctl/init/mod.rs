@@ -85,7 +85,7 @@ fn write_agent_directory(
     let (kind, folder) = choose_kind(&root)?;
     let name = qualified_name(&repository, &kind);
     let toolchains = toolchains::detect(&root);
-    let image = choose_image(&toolchains)?;
+    let image = choose_image(&toolchains);
     let (checkout, worktree) = choose_checkout(&root, image)?;
     let size = choose_size(home.path())?;
     let workspace = match &checkout {
@@ -257,35 +257,21 @@ fn docker_running() -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Asks for the image: one built here for `toolchains` when Docker runs, else the base image.
-fn choose_image(toolchains: &[toolchains::Toolchain]) -> Result<Image, Error> {
+/// The image: one built here, which can add `toolchains` and clone the repository, whenever
+/// Docker runs, and the base image as it is otherwise.
+fn choose_image(toolchains: &[toolchains::Toolchain]) -> Image {
     if !docker_running() {
         eprintln!(
-            "Docker is not running here, so the agent runs the published base image as it is. Start Docker and run \
-             `agentctl init` again to build an image with this repository's toolchains."
+            "\nDocker is not running, so the agent gets the standard image and works on this checkout. Start Docker \
+             first to give it this repository's tools."
         );
-        return Ok(Image::Base);
+        return Image::Base;
     }
-    let built = if toolchains.is_empty() {
-        "Built with Docker here from a Dockerfile to extend: no toolchains found beyond the base image (recommended)"
-            .to_owned()
-    } else {
-        format!(
-            "Built with Docker here: the base image plus {} (recommended)",
-            toolchains
-                .iter()
-                .map(toolchains::Toolchain::describe)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    let options = [built, "The published base image as it is: no build".to_owned()];
-    Ok(
-        match prompt::choose("Which image should the agent run?", &options, Some(0))? {
-            Some(1) => Image::Base,
-            _ => Image::Built,
-        },
-    )
+    if !toolchains.is_empty() {
+        let found: Vec<String> = toolchains.iter().map(toolchains::Toolchain::describe).collect();
+        eprintln!("\nThe agent gets {}.", found.join(", "));
+    }
+    Image::Built
 }
 
 /// Asks whether the agent clones the repository or works on this checkout, returning
@@ -293,7 +279,6 @@ fn choose_image(toolchains: &[toolchains::Toolchain]) -> Result<Image, Error> {
 /// Only a built image can clone, and only a repository with a remote can be cloned.
 fn choose_checkout(root: &Path, image: Image) -> Result<(Checkout, bool), Error> {
     if image == Image::Base {
-        eprintln!("The base image clones nothing, so the agent works on this checkout.");
         return Ok((Checkout::Mount, false));
     }
     let Some(remote) = remote(root) else {
