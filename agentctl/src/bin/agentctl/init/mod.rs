@@ -82,7 +82,7 @@ fn write_agent_directory(
         return Ok(None);
     }
     let repository = agent_name(&root);
-    let (kind, folder) = choose_kind(&root, &repository)?;
+    let (kind, folder) = choose_kind(&root)?;
     let name = qualified_name(&repository, &kind);
     let toolchains = toolchains::detect(&root);
     let image = choose_image(&toolchains)?;
@@ -159,22 +159,16 @@ fn write_agent_directory(
 
 /// Asks what kind of agent this is, which names its directory under `agents/`, until the answer
 /// names a directory that does not exist yet.
-fn choose_kind(root: &Path, repository: &str) -> Result<(String, PathBuf), Error> {
+fn choose_kind(root: &Path) -> Result<(String, PathBuf), Error> {
     let agents = root.join(template::AGENTS_DIRECTORY);
     let suggestion = ["dev", "agent"]
         .into_iter()
         .find(|kind| !agents.join(kind).exists())
         .map_or_else(|| "dev-2".to_owned(), str::to_owned);
     loop {
-        let answer = prompt::ask_lines(&[
-            "What kind of agent is this?",
-            &format!(
-                "Its files go in {}/<kind>/ and it is named {repository}-<kind>,",
-                template::AGENTS_DIRECTORY
-            ),
-            "as altinn-studio has agents/minimal, agents/full and agents/desktop.",
-            &format!("Kind [{suggestion}]"),
-        ])?;
+        let answer = prompt::ask(&format!(
+            "What kind of agent is this, such as dev or reviewer? [{suggestion}]"
+        ))?;
         let kind = if answer.is_empty() {
             suggestion.clone()
         } else {
@@ -186,7 +180,7 @@ fn choose_kind(root: &Path, repository: &str) -> Result<(String, PathBuf), Error
         }
         let folder = agents.join(&kind);
         if folder.exists() {
-            eprintln!("{} already exists; choose another kind.", folder.display());
+            eprintln!("This repository already has a {kind} agent; choose another kind.");
             continue;
         }
         return Ok((kind, folder));
@@ -308,16 +302,10 @@ fn choose_checkout(root: &Path, image: Image) -> Result<(Checkout, bool), Error>
     };
     let options = [
         format!("A fresh clone of {remote}, made in the agent (recommended)"),
-        format!(
-            "This checkout, shared with the agent: its changes land on this machine directly ({})",
-            template::WORKTREE_VARIANT
-        ),
+        "This checkout, shared with the agent: its changes land on this machine directly".to_owned(),
     ];
-    let worktree = prompt::choose_lines(
-        &[
-            "Which copy of the repository should the agent work on?",
-            "Both are written, so the other can be created later from the same directory.",
-        ],
+    let worktree = prompt::choose(
+        "Which copy of the repository should the agent work on?",
         &options,
         Some(0),
     )? == Some(1);
