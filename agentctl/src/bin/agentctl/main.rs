@@ -1923,7 +1923,7 @@ async fn status(home: &ControlPlaneHome, client: &Client) -> CommandResult<()> {
                     Some(expires_at) => format!("expires {}", expires_at.date()),
                     None => format!("expires {}", token.kind.unstated_expiry()),
                 };
-                format!("{}: {}, {expiry}", token.scope(), token.account.login)
+                format!("acts as {} in {}, {expiry}", token.account.login, token.scope())
             })
             .collect()
     };

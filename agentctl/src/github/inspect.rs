@@ -96,6 +96,53 @@ pub(super) async fn inspect_at(api: &str, token: &str, repository: Option<&Repos
     })
 }
 
+/// What kind of GitHub account owns repositories under a name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OwnerKind {
+    /// An organization.
+    Organization,
+    /// A personal account.
+    User,
+}
+
+/// Which kind of account GitHub has under `owner`, asked with `token`, or `None` when there is
+/// none.
+///
+/// # Errors
+///
+/// Returns an error when GitHub cannot be reached or answers unexpectedly.
+pub async fn owner_kind(token: &str, owner: &str) -> Result<Option<OwnerKind>, Error> {
+    owner_kind_at(API, token, owner).await
+}
+
+async fn owner_kind_at(api: &str, token: &str, owner: &str) -> Result<Option<OwnerKind>, Error> {
+    #[derive(Deserialize)]
+    struct Account {
+        #[serde(rename = "type")]
+        kind: String,
+    }
+
+    let response = get(&reqwest::Client::new(), &format!("{api}/users/{owner}"), token).await?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(Error::Invalid(format!(
+            "GitHub answered {status} when asked about {owner}"
+        )));
+    }
+    let account: Account = response
+        .json()
+        .await
+        .map_err(|error| Error::Invalid(format!("GitHub returned an unexpected account for {owner}: {error}")))?;
+    Ok(Some(if account.kind == "Organization" {
+        OwnerKind::Organization
+    } else {
+        OwnerKind::User
+    }))
+}
+
 async fn get(client: &reqwest::Client, url: &str, token: &str) -> Result<reqwest::Response, Error> {
     client
         .get(url)
@@ -299,6 +346,36 @@ pub(super) mod tests {
         assert_eq!(inspection.expires_at, None);
         assert_eq!(inspection.account.name, "digdir-bot");
         assert_eq!(inspection.account.email, "42+digdir-bot@users.noreply.github.com");
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn an_owner_is_an_organization_a_user_or_missing() {
+        let (api, _requests) = serve(vec![
+            Answer {
+                path: "/users/digdir",
+                status: "200 OK",
+                headers: "",
+                body: r#"{"login":"digdir","type":"Organization"}"#,
+            },
+            Answer {
+                path: "/users/someone",
+                status: "200 OK",
+                headers: "",
+                body: r#"{"login":"someone","type":"User"}"#,
+            },
+            Answer {
+                path: "/users/gone",
+                status: "500 Internal Server Error",
+                headers: "",
+                body: "{}",
+            },
+        ])
+        .await;
+        let kind = |owner: &'static str| owner_kind_at(&api, "github_pat_x", owner);
+        assert_eq!(kind("digdir").await.expect("found"), Some(OwnerKind::Organization));
+        assert_eq!(kind("someone").await.expect("found"), Some(OwnerKind::User));
+        assert_eq!(kind("doesntexist").await.expect("not found"), None);
+        kind("gone").await.expect_err("an unexpected answer");
     }
 
     #[tokio::test(flavor = "local")]

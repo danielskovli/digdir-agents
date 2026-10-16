@@ -3,7 +3,7 @@
 use agent::{
     Error,
     control_api::Client,
-    github::{GithubToken, Inspection, Logout, Repository, TokenKind},
+    github::{GithubToken, Inspection, Logout, OwnerKind, Repository, TokenKind},
 };
 use zeroize::Zeroizing;
 
@@ -136,7 +136,20 @@ async fn attempt(client: &Client, source: Source, owner: Option<String>) -> Comm
         eprintln!("\n{refused}");
         return Ok(Attempt::Declined);
     }
-    let warnings = warnings(&inspection, kind, agent::github::host_login().as_deref());
+    // A repository the token sees shows the owner is right; otherwise a mistyped owner, or
+    // another person's account, leaves the token unusable for its repositories.
+    let owner_kind = match owner.as_deref() {
+        Some(owner) if !matches!(inspection.repository, Some((_, true))) => {
+            agent::github::owner_kind(&token, owner).await.ok()
+        }
+        _ => None,
+    };
+    let mut warnings = warnings(&inspection, kind, agent::github::host_login().as_deref());
+    if let (Some(owner), Some(owner_kind)) = (owner.as_deref(), owner_kind)
+        && let Some(warning) = owner_warning(owner, owner_kind, &inspection.account.login, kind)
+    {
+        warnings.insert(0, warning);
+    }
     eprint!("{}", summary(&inspection, owner.as_deref(), &warnings));
     if interactive {
         let question = format!(
@@ -486,6 +499,20 @@ fn signed_in_as(expected: &str, actual: &str) -> Result<(), Error> {
     }
 }
 
+/// A warning when the token cannot act on `owner`'s repositories: there is no such owner, or it
+/// is another person's account, which a fine-grained token of `login` cannot reach.
+fn owner_warning(owner: &str, owner_kind: Option<OwnerKind>, login: &str, kind: TokenKind) -> Option<String> {
+    match owner_kind {
+        None => Some(format!(
+            "GitHub has no user or organization named {owner}, so no agent will use this token"
+        )),
+        Some(OwnerKind::User) if kind == TokenKind::FineGrained && !owner.eq_ignore_ascii_case(login) => Some(format!(
+            "{owner} is a personal account, not an organization, and a fine-grained token of {login} cannot act on its repositories"
+        )),
+        Some(_) => None,
+    }
+}
+
 /// Soft warnings about a token, each one line.
 fn warnings(inspection: &Inspection, kind: TokenKind, host_login: Option<&str>) -> Vec<String> {
     let login = &inspection.account.login;
@@ -707,5 +734,23 @@ mod tests {
         ] {
             assert!(text.contains(expected), "{expected} in {text}");
         }
+    }
+
+    #[test]
+    fn an_owner_the_token_cannot_reach_is_called_out() {
+        let fine = TokenKind::FineGrained;
+        assert!(owner_warning("digdir", Some(OwnerKind::Organization), "digdir-bot", fine).is_none());
+        assert!(
+            owner_warning("DigdirBot", Some(OwnerKind::User), "digdirbot", fine).is_none(),
+            "its own account"
+        );
+        let other = owner_warning("doesntexist", Some(OwnerKind::User), "danielskovli", fine).expect("warned");
+        assert!(other.contains("personal account"), "{other}");
+        assert!(
+            owner_warning("doesntexist", Some(OwnerKind::User), "danielskovli", TokenKind::Classic).is_none(),
+            "a classic token reaches repositories it collaborates on"
+        );
+        let missing = owner_warning("nobody", None, "danielskovli", fine).expect("warned");
+        assert!(missing.contains("no user or organization named nobody"), "{missing}");
     }
 }
