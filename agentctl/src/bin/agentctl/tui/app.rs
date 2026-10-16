@@ -938,7 +938,7 @@ impl CreateForm {
 }
 
 /// Returns `name-N` for the lowest N from 1 that no Agent uses, or `name` itself when no numbered name fits.
-fn numbered_name(name: &str, agents: &[Agent]) -> String {
+pub(crate) fn numbered_name(name: &str, agents: &[Agent]) -> String {
     (1..=u32::MAX)
         .map(|number| format!("{name}-{number}"))
         .take_while(|numbered| numbered.len() <= ::sandbox::MAX_SANDBOX_NAME_BYTES)

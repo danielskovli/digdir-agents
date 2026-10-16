@@ -1,4 +1,5 @@
 mod app;
+pub(crate) use app::numbered_name;
 mod open;
 mod provisioning;
 mod terminal;
@@ -946,7 +947,7 @@ async fn create(
     }
 }
 
-async fn create_agent(
+pub(crate) async fn create_agent(
     client: &Client,
     manifest: PathBuf,
     name: String,

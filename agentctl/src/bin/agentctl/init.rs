@@ -72,8 +72,17 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResu
             return Ok(None);
         }
     }
-    let Some(name) = crate::tui::create_agent_here(home, client).await? else {
-        return Ok(None);
+    let manifests = crate::tui::working_tree_manifests(&directory);
+    let name = if let [manifest] = manifests.as_slice() {
+        create_from(client, manifest).await?
+    } else {
+        eprintln!();
+        eprintln!("This repository has several agent manifests. Choose one, and a name, in the form that opens next.");
+        prompt::wait_for_enter("Press Enter to open it…")?;
+        let Some(name) = crate::tui::create_agent_here(home, client).await? else {
+            return Ok(None);
+        };
+        name
     };
     crate::wait_until_converged(client, &name, std::time::Duration::from_mins(10)).await?;
     eprintln!("The agent {name} is ready.");
@@ -262,6 +271,33 @@ async fn offer_github_login(client: &Client, reason: Option<&str>) -> Github {
             eprintln!("agentctl: {error}; continuing without GitHub");
             Github::None
         }
+    }
+}
+
+/// Creates the agent from the repository's only manifest, asking for its name with the manifest's
+/// own as the suggestion, or the first free numbered one when an agent already has it.
+async fn create_from(client: &Client, manifest: &Path) -> CommandResult<String> {
+    let manifest_name = agent::manifest::resolve(manifest)?.agent.metadata.name;
+    let agents = client.list_agents().await?;
+    let taken = |name: &str| agents.iter().any(|agent| agent.metadata.name == name);
+    let suggestion = if taken(&manifest_name) {
+        crate::tui::numbered_name(&manifest_name, &agents)
+    } else {
+        manifest_name
+    };
+    loop {
+        let answer = prompt::ask(&format!("Name of the agent [{suggestion}]"))?;
+        let name = if answer.is_empty() { suggestion.clone() } else { answer };
+        if let Err(invalid) = ::sandbox::SandboxName::new(name.clone()) {
+            eprintln!("{name:?} cannot name an agent: {invalid}.");
+            continue;
+        }
+        if taken(&name) {
+            eprintln!("An agent named {name} already exists.");
+            continue;
+        }
+        crate::tui::create_agent(client, manifest.to_path_buf(), name.clone(), None).await?;
+        return Ok(name);
     }
 }
 
