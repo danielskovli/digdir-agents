@@ -139,7 +139,16 @@ pub(crate) fn ask_lines(lines: &[&str]) -> Result<String, Error> {
 ///
 /// Returns an error when standard input cannot be read.
 pub(crate) fn choose(question: &str, options: &[String], default: Option<usize>) -> Result<Option<usize>, Error> {
-    pose(&[question], "\n");
+    choose_lines(&[question], options, default)
+}
+
+/// Like [`choose`], for a question of several lines: the question first, then what it is about.
+///
+/// # Errors
+///
+/// Returns an error when standard input cannot be read.
+pub(crate) fn choose_lines(lines: &[&str], options: &[String], default: Option<usize>) -> Result<Option<usize>, Error> {
+    pose(lines, "\n");
     for (number, option) in options.iter().enumerate() {
         eprintln!("  {}. {option}", number + 1);
     }

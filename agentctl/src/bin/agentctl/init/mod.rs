@@ -9,9 +9,11 @@ use agent::{Error, control_api::Client, harness::AuthenticationStatus, local::ho
 
 use crate::{CommandResult, prompt};
 
-/// The image a new manifest starts from: the published self-development image, which has both
-/// harnesses, systemd, SSH and common toolchains.
-const TEMPLATE_IMAGE: &str = "ghcr.io/digdir/digdir-agents/agentctl-self-dev-minimal:latest";
+mod sizing;
+mod template;
+mod toolchains;
+
+use template::{Checkout, Choices, Github, IMAGE_DIRECTORY, Image};
 
 /// Sets up an Agent for the current directory, returning its name once it is Ready, or `None`
 /// when the user declined a step.
@@ -52,12 +54,25 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResu
         if !prompt::confirm(&format!("No agent manifest here. Write {}?", manifest.display()))? {
             return Ok(None);
         }
-        let image = choose_image()?;
-        let dockerfile = match image {
-            Image::Prebuilt => None,
-            Image::Custom => Some(write_dockerfile(root)?),
+        let toolchains = toolchains::detect(root);
+        let image = choose_image(&toolchains)?;
+        let checkout = choose_checkout(root, image)?;
+        let size = choose_size(home.path())?;
+        let choices = Choices {
+            name: agent_name(root),
+            github,
+            image,
+            checkout,
+            size,
         };
-        write_new(&manifest, &template(&agent_name(root), &status, &github, image))?;
+        let dockerfile = match image {
+            Image::Base => None,
+            Image::Built => Some(write_dockerfile(
+                root,
+                &template::dockerfile(&choices.checkout, &toolchains),
+            )?),
+        };
+        write_new(&manifest, &template::manifest(&choices, &status))?;
         eprintln!("Wrote {}.", manifest.display());
         let question = if dockerfile.is_some() {
             "Edit agent.yaml and the Dockerfile before creating the agent?"
@@ -114,33 +129,131 @@ fn edit_manifest(manifest: &Path, dockerfile: Option<&Path>) -> Result<bool, Err
     }
 }
 
-/// Which image a new manifest uses.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Image {
-    /// The published development image.
-    Prebuilt,
-    /// The repository's own `.agentctl/Dockerfile`, built with Docker on this host.
-    Custom,
+fn docker_running() -> bool {
+    std::process::Command::new("docker")
+        .args(["version", "--format", "{{.Server.Version}}"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
-/// Where the custom image's Dockerfile and its build context live, relative to the manifest.
-const IMAGE_DIRECTORY: &str = ".agentctl";
-
-fn choose_image() -> Result<Image, Error> {
+/// Asks for the image: one built here for `toolchains` when Docker runs, else the base image.
+fn choose_image(toolchains: &[toolchains::Toolchain]) -> Result<Image, Error> {
+    if !docker_running() {
+        eprintln!(
+            "Docker is not running here, so the agent runs the published base image as it is. Start Docker and run \
+             `agentctl init` again to build an image with this repository's toolchains."
+        );
+        return Ok(Image::Base);
+    }
+    let found = if toolchains.is_empty() {
+        "nothing beyond the base image found".to_owned()
+    } else {
+        toolchains
+            .iter()
+            .map(toolchains::Toolchain::describe)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let options = [
-        "Pre-built: the published development image (recommended)".to_owned(),
-        "Custom: a Dockerfile in this repository, built with Docker on this machine".to_owned(),
+        format!("Built for this repository with Docker here: the base image plus {found} (recommended)"),
+        "The published base image as it is: no build".to_owned(),
     ];
     Ok(
         match prompt::choose("Which image should the agent run?", &options, Some(0))? {
-            Some(1) => Image::Custom,
-            _ => Image::Prebuilt,
+            Some(1) => Image::Base,
+            _ => Image::Built,
         },
     )
 }
 
-/// Writes the custom image's Dockerfile under `root`, or keeps one that is already there.
-fn write_dockerfile(root: &Path) -> Result<PathBuf, Error> {
+/// Asks whether the agent clones the repository or works on this checkout. Only a built image
+/// can clone, and only a repository with a remote can be cloned.
+fn choose_checkout(root: &Path, image: Image) -> Result<Checkout, Error> {
+    if image == Image::Base {
+        eprintln!("The base image clones nothing, so the agent works on this checkout.");
+        return Ok(Checkout::Mount);
+    }
+    let Some(remote) = remote(root) else {
+        eprintln!("This checkout has no remote to clone, so the agent works on it directly.");
+        return Ok(Checkout::Mount);
+    };
+    let options = [
+        format!("A fresh clone of {remote}, made in the agent (recommended)"),
+        "This checkout, shared with the agent: its changes land on this machine directly".to_owned(),
+    ];
+    Ok(
+        match prompt::choose(
+            "Which copy of the repository should the agent work on?",
+            &options,
+            Some(0),
+        )? {
+            Some(1) => Checkout::Mount,
+            _ => Checkout::Clone(remote),
+        },
+    )
+}
+
+/// The repository to clone: `owner/name` on GitHub, else the `origin` remote's URL.
+fn remote(root: &Path) -> Option<String> {
+    if let Some(repository) = crate::github::current_repository() {
+        return Some(repository.to_string());
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["remote", "get-url", "origin"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (output.status.success() && !url.is_empty()).then_some(url)
+}
+
+/// Asks for the agent's size, recommending one that fits this host and the free space beside
+/// agentd's state in `state`.
+fn choose_size(state: &Path) -> Result<sizing::Size, Error> {
+    let Some(host) = sizing::Host::measure(state) else {
+        let size = sizing::Host {
+            cpus: 4,
+            memory_gib: 16,
+            free_disk_gib: 32,
+        }
+        .recommend();
+        eprintln!("Could not measure this machine, so the agent gets {}.", size.describe());
+        return Ok(size);
+    };
+    let recommended = host.recommend();
+    let mut lines = vec![
+        "How large should the agent be?".to_owned(),
+        format!(
+            "This machine has {} CPUs, {} GiB memory and {} GiB free disk. Edit agent.yaml next for other sizes.",
+            host.cpus, host.memory_gib, host.free_disk_gib
+        ),
+    ];
+    if host.free_disk_gib < sizing::LOW_DISK_GIB {
+        lines.push(format!(
+            "⚠ That is little free disk: an agent's disk grows into it as the agent writes, up to its size. \
+             Free some space, or watch it with `df -h {}`.",
+            state.display()
+        ));
+    }
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let options = [
+        format!("{} (recommended)", recommended.describe()),
+        format!("{}, for running several agents", recommended.smaller().describe()),
+    ];
+    Ok(match prompt::choose_lines(&lines, &options, Some(0))? {
+        Some(1) => recommended.smaller(),
+        _ => recommended,
+    })
+}
+
+/// Writes the built image's Dockerfile under `root`, or keeps one that is already there.
+fn write_dockerfile(root: &Path, contents: &str) -> Result<PathBuf, Error> {
     let directory = root.join(IMAGE_DIRECTORY);
     let dockerfile = directory.join("Dockerfile");
     if dockerfile.exists() {
@@ -148,40 +261,9 @@ fn write_dockerfile(root: &Path) -> Result<PathBuf, Error> {
         return Ok(dockerfile);
     }
     std::fs::create_dir_all(&directory)?;
-    write_new(&dockerfile, &dockerfile_template())?;
+    write_new(&dockerfile, contents)?;
     eprintln!("Wrote {}.", dockerfile.display());
     Ok(dockerfile)
-}
-
-/// A Dockerfile that builds on the published image, so the agent keeps what the platform needs.
-fn dockerfile_template() -> String {
-    format!(
-        "# Created by `agentctl init`: the image this repository's agent runs. It builds with Docker on
-# the machine that runs agentctl.
-#
-# It starts from the published development image, which has everything an agent needs: systemd,
-# OpenSSH, the agent user, Claude Code, Codex, Git, the GitHub CLI and common toolchains. Add what
-# this repository needs below. An agent keeps the image it was created with, so to use changes,
-# delete the agent and create it again.
-FROM {TEMPLATE_IMAGE}
-
-USER root
-
-# The published image clones the agent platform's own repositories at boot; this agent does not
-# need them.
-RUN systemctl disable agent-workspace-init.service
-
-# Add packages and tools here, for example:
-# RUN apt-get update \\
-#     && apt-get install --yes --no-install-recommends postgresql-client \\
-#     && rm -rf /var/lib/apt/lists/*
-# RUN npm install --global pnpm
-
-USER agent
-WORKDIR {code}
-",
-        code = agent::sandbox::platform::WORKING_DIRECTORY
-    )
 }
 
 /// Creates `path` with `contents`, refusing to replace a file that appeared meanwhile.
@@ -191,17 +273,6 @@ fn write_new(path: &Path, contents: &str) -> Result<(), Error> {
     let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(contents.as_bytes())?;
     Ok(())
-}
-
-/// Whether a new manifest gives the Agent a GitHub token, and whose.
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum Github {
-    /// No token applies; the manifest shows how to add one.
-    None,
-    /// The only stored token, whichever owner it is for.
-    Only,
-    /// The token for this owner, or the one for every organization without its own.
-    Owner(String),
 }
 
 /// Makes sure Agents of this repository have a working GitHub token: present, not expired, and
@@ -349,73 +420,6 @@ fn agent_name(root: &Path) -> String {
     }
 }
 
-/// A manifest with the signed-in harnesses and, when one is signed in, the GitHub account.
-fn template(name: &str, status: &AuthenticationStatus, github: &Github, image: Image) -> String {
-    let mut harnesses = String::new();
-    if status.claude_code {
-        harnesses.push_str("    - type: claudeCode\n      auth: mediated\n");
-        if status.codex {
-            harnesses.push_str("      default: true\n");
-        }
-    }
-    if status.codex {
-        harnesses.push_str("    - type: codex\n      auth: mediated\n");
-        if status.claude_code {
-            harnesses.push_str(
-                "      # Optional, so the agent is still created on a host without a Codex login.\n      optional: true\n",
-            );
-        }
-    }
-    let accounts = match github {
-        Github::Owner(owner) => format!(
-            "  # Act as the GitHub token `agentctl github login` stored for {owner}.\n  accounts:\n    - type: github\n      owner: {owner}\n"
-        ),
-        Github::Only => {
-            "  # Act as the GitHub token `agentctl github login` stored.\n  accounts:\n    - type: github\n".to_owned()
-        }
-        Github::None => {
-            "  # Run `agentctl github login` and uncomment to act as a GitHub account.\n  # accounts:\n  #   - type: github\n"
-                .to_owned()
-        }
-    };
-    let code = agent::sandbox::platform::WORKING_DIRECTORY;
-    let image = match image {
-        Image::Prebuilt => format!("    image:\n      type: reference\n      reference: {TEMPLATE_IMAGE}\n"),
-        Image::Custom => format!(
-            "    # Built with Docker on this machine from {IMAGE_DIRECTORY}/Dockerfile.\n    image:\n      type: build\n      context: {IMAGE_DIRECTORY}\n      dockerfile: Dockerfile\n"
-        ),
-    };
-    format!(
-        "# Created by `agentctl init`. Change it and run `agentctl apply` to update the agent.
-apiVersion: agents.platform/v1alpha1
-kind: Agent
-metadata:
-  name: {name}
-spec:
-  sandbox:
-{image}    platform:
-      os: linux
-    resources:
-      cpu: \"4\"
-      memory: \"8Gi\"
-      rootFilesystem:
-        capacity: \"64Gi\"
-        mode: layered
-    initSystem: image
-    # The image clones its own repositories into {code}. To work on this checkout
-    # instead, uncomment the mount; mounts cannot change once the agent exists.
-    # mounts:
-    #   - type: bind
-    #     source: .
-    #     target: {code}/{name}
-    #     readOnly: false
-  harnesses:
-{harnesses}{accounts}  access:
-    - type: ssh
-"
-    )
-}
-
 /// Where a new manifest for `directory` goes: the repository root, so the Agent is found from
 /// anywhere in the checkout, or `directory` itself outside a repository.
 fn manifest_location(directory: &Path) -> PathBuf {
@@ -430,76 +434,6 @@ mod tests {
 
     use super::*;
 
-    fn status(claude_code: bool, codex: bool) -> AuthenticationStatus {
-        AuthenticationStatus {
-            claude_code,
-            codex,
-            github: Vec::new(),
-        }
-    }
-
-    fn decoded(text: &str) -> agent::Agent {
-        agent::manifest::decode(text.as_bytes()).expect("the template is a valid manifest")
-    }
-
-    #[test]
-    fn the_template_declares_the_signed_in_harnesses() {
-        let claude = decoded(&template(
-            "worker",
-            &status(true, false),
-            &Github::None,
-            Image::Prebuilt,
-        ));
-        assert_eq!(claude.metadata.name, "worker");
-        assert_eq!(claude.spec.harnesses.len(), 1);
-        assert_eq!(claude.spec.harnesses[0].kind, agent::Harness::ClaudeCode);
-        assert!(!claude.spec.github_account());
-        assert!(claude.spec.ssh_access());
-
-        let both = decoded(&template("worker", &status(true, true), &Github::None, Image::Prebuilt));
-        assert_eq!(
-            both.spec.default_harness().map(|harness| harness.kind),
-            Some(agent::Harness::ClaudeCode)
-        );
-        assert!(
-            both.spec
-                .harness(agent::Harness::Codex)
-                .is_some_and(|codex| codex.optional)
-        );
-
-        let codex = decoded(&template(
-            "worker",
-            &status(false, true),
-            &Github::None,
-            Image::Prebuilt,
-        ));
-        assert_eq!(codex.spec.harnesses.len(), 1);
-        assert!(!codex.spec.harnesses[0].optional);
-    }
-
-    #[test]
-    fn the_template_names_the_github_owner_only_when_a_token_applies() {
-        let owned = decoded(&template(
-            "worker",
-            &status(true, false),
-            &Github::Owner("digdir".into()),
-            Image::Prebuilt,
-        ));
-        assert!(owned.spec.github_account());
-        assert_eq!(owned.spec.github_owner(), Some("digdir"));
-        let only = decoded(&template(
-            "worker",
-            &status(true, false),
-            &Github::Only,
-            Image::Prebuilt,
-        ));
-        assert!(only.spec.github_account());
-        assert_eq!(only.spec.github_owner(), None);
-        let without = template("worker", &status(true, false), &Github::None, Image::Prebuilt);
-        assert!(!decoded(&without).spec.github_account());
-        assert!(without.contains("# accounts:"), "{without}");
-    }
-
     #[test]
     fn the_suggested_name_is_the_directory_in_sandbox_name_characters() {
         assert_eq!(agent_name(Path::new("/src/digdir-agents")), "digdir-agents");
@@ -510,51 +444,15 @@ mod tests {
     }
 
     #[test]
-    fn the_template_offers_this_checkout_as_a_commented_mount() {
-        let text = template("worker", &status(true, false), &Github::None, Image::Prebuilt);
-        let uncommented = text
-            .replace("    # mounts:", "    mounts:")
-            .replace("    #   ", "      ");
-        let agent = decoded(&uncommented);
-        assert!(matches!(
-            agent.spec.sandbox.mounts.as_slice(),
-            [agent::MountSpec::Bind { source, target, read_only: false }]
-                if source == Path::new(".") && target.as_str() == format!("{}/worker", agent::sandbox::platform::WORKING_DIRECTORY)
-        ));
-    }
-
-    #[test]
-    fn a_custom_image_is_built_from_the_repositorys_own_dockerfile() {
-        let agent = decoded(&template("worker", &status(true, false), &Github::None, Image::Custom));
-        let image = serde_yaml_ng::to_value(&agent.spec.sandbox.image).expect("image");
-        assert_eq!(image["type"], "build", "{image:?}");
-        assert_eq!(image["context"], IMAGE_DIRECTORY, "{image:?}");
-        assert_eq!(image["dockerfile"], "Dockerfile", "{image:?}");
-
-        let dockerfile = dockerfile_template();
-        assert!(
-            dockerfile.contains(&format!("\nFROM {TEMPLATE_IMAGE}\n")),
-            "{dockerfile}"
-        );
-        assert!(
-            dockerfile.contains("RUN systemctl disable agent-workspace-init.service"),
-            "{dockerfile}"
-        );
-        assert!(
-            dockerfile
-                .trim_end()
-                .ends_with(&format!("WORKDIR {}", agent::sandbox::platform::WORKING_DIRECTORY)),
-            "{dockerfile}"
-        );
-    }
-
-    #[test]
     fn the_dockerfile_is_written_once_and_an_existing_one_is_kept() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
-        let written = write_dockerfile(directory.path()).expect("written");
+        let written = write_dockerfile(directory.path(), "FROM base\n").expect("written");
         assert_eq!(written, directory.path().join(".agentctl").join("Dockerfile"));
         std::fs::write(&written, "FROM mine\n").expect("customized");
-        assert_eq!(write_dockerfile(directory.path()).expect("kept"), written);
+        assert_eq!(
+            write_dockerfile(directory.path(), "FROM base\n").expect("kept"),
+            written
+        );
         assert_eq!(std::fs::read_to_string(&written).expect("read"), "FROM mine\n");
     }
 
