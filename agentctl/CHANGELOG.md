@@ -24,6 +24,10 @@ Agents. The Rust workspace version is a build detail and is not tracked here.
 - `agentctl` on its own, and `attach`, `exec` or `ssh` in a directory without an Agent, ask whether to open or set up the Agent there, instead of only printing help or an error. ([install](https://github.com/digdir/digdir-agents/tree/main/agentctl#install))
 - An Agent manifest no longer needs `home` or `network`: without `home` nothing is copied into `/home/agent`, and without `network` all traffic goes through the host's network mediator, as before.
 
+### Fixed
+
+- A new agent's first session starts at Claude Code's prompt instead of its theme picker, security notes, folder trust question and bypass-permissions warning, whatever image the agent uses. ([agentctl](https://github.com/digdir/digdir-agents/tree/main/agentctl#images-home-and-harnesses))
+
 ## [0.1.0-preview.11] - 2026-10-12
 
 ### Changed

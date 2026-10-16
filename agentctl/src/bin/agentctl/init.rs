@@ -57,7 +57,6 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResu
             Image::Prebuilt => None,
             Image::Custom => Some(write_dockerfile(root)?),
         };
-        write_home(root)?;
         write_new(&manifest, &template(&agent_name(root), &status, &github, image))?;
         eprintln!("Wrote {}.", manifest.display());
         let question = if dockerfile.is_some() {
@@ -129,38 +128,6 @@ fn choose_image() -> Result<Image, Error> {
             _ => Image::Prebuilt,
         },
     )
-}
-
-/// Writes the agent's home overlay under `root`: Claude Code's state with its first-run questions
-/// answered, as the platform's own agents ship it. An existing file is kept.
-fn write_home(root: &Path) -> Result<(), Error> {
-    let state = root
-        .join(IMAGE_DIRECTORY)
-        .join("home")
-        .join(".claude")
-        .join(".claude.json");
-    if state.exists() {
-        return Ok(());
-    }
-    if let Some(directory) = state.parent() {
-        std::fs::create_dir_all(directory)?;
-    }
-    write_new(&state, &claude_state())
-}
-
-/// Claude Code's state with onboarding done, bypass-permissions mode accepted and the working
-/// directory trusted, which an unattended session otherwise stops at.
-fn claude_state() -> String {
-    let state = serde_json::json!({
-        "hasCompletedOnboarding": true,
-        "bypassPermissionsModeAccepted": true,
-        "projects": {
-            agent::sandbox::platform::WORKING_DIRECTORY: { "hasTrustDialogAccepted": true }
-        }
-    });
-    let mut text = serde_json::to_string_pretty(&state).unwrap_or_default();
-    text.push('\n');
-    text
 }
 
 /// Writes the custom image's Dockerfile under `root`, or keeps one that is already there.
@@ -406,10 +373,6 @@ spec:
     #     source: .
     #     target: {code}/{name}
     #     readOnly: false
-  # Copied into the agent's home directory on every pass. It marks Claude Code's first-run questions as answered,
-  # so sessions start without stopping at them.
-  home:
-    source: {IMAGE_DIRECTORY}/home
   harnesses:
 {harnesses}{accounts}  access:
     - type: ssh
@@ -547,34 +510,6 @@ mod tests {
                 .ends_with(&format!("WORKDIR {}", agent::sandbox::platform::WORKING_DIRECTORY)),
             "{dockerfile}"
         );
-    }
-
-    #[test]
-    fn every_new_agent_starts_without_claude_codes_first_run_questions() {
-        let agent = decoded(&template(
-            "worker",
-            &status(true, false),
-            &Github::None,
-            Image::Prebuilt,
-        ));
-        assert_eq!(
-            agent.spec.home.map(|home| home.source),
-            Some(PathBuf::from(".agentctl/home"))
-        );
-        let directory = tempfile::TempDir::new().expect("temporary directory");
-        write_home(directory.path()).expect("home");
-        let path = directory.path().join(".agentctl/home/.claude/.claude.json");
-        let state: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).expect("state")).expect("JSON");
-        assert_eq!(state["hasCompletedOnboarding"], true);
-        assert_eq!(state["bypassPermissionsModeAccepted"], true);
-        assert_eq!(
-            state["projects"][agent::sandbox::platform::WORKING_DIRECTORY]["hasTrustDialogAccepted"],
-            true
-        );
-        std::fs::write(&path, "{}").expect("customized");
-        write_home(directory.path()).expect("kept");
-        assert_eq!(std::fs::read_to_string(&path).expect("read"), "{}");
     }
 
     #[test]

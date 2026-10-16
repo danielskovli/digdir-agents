@@ -10,7 +10,7 @@ use ::sandbox::execution::ExecutionSpec;
 use crate::Error;
 
 pub(crate) use linux::{
-    CONTAINER_HOST, HOME, PLATFORM_API_URL_FILE, PORTABLE_TERMINAL, USER, UTF8_LOCALE, run_checked,
+    CONTAINER_HOST, HOME, PLATFORM_API_URL_FILE, PORTABLE_TERMINAL, USER, UTF8_LOCALE, path_exists, run_checked,
 };
 pub use linux::{Linux, WORKING_DIRECTORY};
 
