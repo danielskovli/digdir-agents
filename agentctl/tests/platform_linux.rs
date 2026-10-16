@@ -5,7 +5,7 @@ mod support;
 use std::{io::Cursor, path::PathBuf, rc::Rc};
 
 use agent::{
-    AgentId,
+    AgentId, HomeSpec,
     control_plane::AgentRecord,
     sandbox::{PlatformAdapter as _, platform::Linux},
 };
@@ -100,7 +100,7 @@ async fn linux_setup_configures_only_the_harnesses_preparation_reported() {
     let agent_id: AgentId = "5c0fd6ac-1d5a-4f8b-9f58-6b0f4de1f6c1".parse().expect("Agent ID");
     let mut resource = support::agent("worker");
     resource.metadata.generation = 1;
-    resource.spec.home.source = home;
+    resource.spec.home = Some(HomeSpec { source: home });
     resource.spec.harnesses[0].default = true;
     resource.spec.harnesses.push(agent::HarnessSpec {
         kind: agent::Harness::Codex,
@@ -163,6 +163,379 @@ async fn linux_setup_configures_only_the_harnesses_preparation_reported() {
     );
 }
 
+/// The arguments of a `git` command run through `/usr/bin/env`, without the leading `git`.
+fn git_args(spec: &sandbox::execution::ExecutionSpec) -> Option<Vec<String>> {
+    match spec.program() {
+        Program::Command { executable, args }
+            if executable.as_str() == "/usr/bin/env" && args.first().map(String::as_str) == Some("git") =>
+        {
+            Some(args[1..].to_vec())
+        }
+        _ => None,
+    }
+}
+
+fn answers(stdout: &str, code: i32) -> Vec<ExecutionEvent> {
+    vec![
+        ExecutionEvent::Started { process_id: None },
+        ExecutionEvent::Stdout(stdout.to_owned().into()),
+        ExecutionEvent::Exited(ExitStatus { code }),
+    ]
+}
+
+/// Runs Linux setup for a Claude Code Agent with or without the GitHub account, with `configured`
+/// answering Git's lookups as the image's own configuration would, and returns every `git`
+/// command it ran.
+async fn git_commands_during_setup(github_account: bool, configured: Option<(&str, &str)>) -> Vec<Vec<String>> {
+    let directory = TempDir::new().expect("temporary directory");
+    std::fs::write(directory.path().join("instructions.md"), "test instructions\n").expect("instruction file");
+    let mut resource = support::agent("worker");
+    resource.metadata.generation = 1;
+    resource.spec.home = None;
+    if github_account {
+        resource.spec.accounts = vec![agent::AccountSpec::Github { owner: None }];
+    }
+    let record = AgentRecord {
+        id: "2f6c3a1e-7d4b-4c8e-9a0f-1b2c3d4e5f60".parse().expect("Agent ID"),
+        source_directory: directory.path().to_path_buf(),
+        manifest_path: None,
+        env_file: None,
+        agent: resource,
+    };
+    let backend = Rc::new(memory::Provider::new());
+    backend.queue_execution_events_matching(is_claude_version, answers("2.1.266 (Claude Code)\n", 0));
+    backend.queue_execution_events_matching(is_podman_presence_check, completed(1));
+    let (helper, rewrites) = configured.map_or((("", 1), ("", 1)), |(helper, rewrites)| ((helper, 0), (rewrites, 0)));
+    backend.queue_execution_events_matching(
+        |spec| git_args(spec).is_some_and(|args| args.iter().any(|arg| arg == "--get-urlmatch")),
+        answers(helper.0, helper.1),
+    );
+    backend.queue_execution_events_matching(
+        |spec| git_args(spec).is_some_and(|args| args.iter().any(|arg| arg == "--get-regexp")),
+        answers(rewrites.0, rewrites.1),
+    );
+    let service = SandboxService::new(backend.clone());
+    let spec = record
+        .agent
+        .spec
+        .sandbox
+        .resolve_from(&record.source_directory, &Platform::native("linux").architecture);
+    let sandbox = service
+        .ensure(&EnsureSandboxRequest::new(
+            record.sandbox_name().expect("Sandbox name"),
+            spec,
+        ))
+        .await
+        .expect("Sandbox");
+
+    Linux::new(PLATFORM_API_URL)
+        .setup(&record, &sandbox, &declared(&record), &setup_phase())
+        .await
+        .expect("setup");
+
+    backend.execution_specs().iter().filter_map(git_args).collect()
+}
+
+fn writes(commands: &[Vec<String>]) -> Vec<Vec<String>> {
+    commands
+        .iter()
+        .filter(|args| args.len() > 2 && args[0] == "config" && args[1] == "--global")
+        .cloned()
+        .collect()
+}
+
+/// Git over HTTPS reaches GitHub with the mediated token even when the image configured nothing,
+/// and GitHub's SSH URLs, which the Sandbox has no key for, go over HTTPS instead.
+#[tokio::test(flavor = "local")]
+async fn linux_setup_gives_git_the_github_account_over_https() {
+    let commands = git_commands_during_setup(true, None).await;
+
+    let writes = writes(&commands);
+    assert_eq!(writes.len(), 3, "{writes:?}");
+    assert_eq!(writes[0][2], "credential.https://github.com.helper", "{writes:?}");
+    assert!(writes[0][3].contains("password=$GITHUB_TOKEN"), "{writes:?}");
+    assert!(
+        !writes[0][3].contains("github_pat"),
+        "only the variable, never a value: {writes:?}"
+    );
+    assert_eq!(
+        writes[1..],
+        [
+            [
+                "config",
+                "--global",
+                "--add",
+                "url.https://github.com/.insteadOf",
+                "git@github.com:"
+            ]
+            .map(String::from),
+            [
+                "config",
+                "--global",
+                "--add",
+                "url.https://github.com/.insteadOf",
+                "ssh://git@github.com/"
+            ]
+            .map(String::from),
+        ]
+    );
+}
+
+/// An image that set up GitHub credentials and URL rewrites keeps them.
+#[tokio::test(flavor = "local")]
+async fn linux_setup_keeps_the_images_own_github_configuration() {
+    let commands = git_commands_during_setup(
+        true,
+        Some((
+            "!/usr/local/bin/gh auth git-credential",
+            "url.https://github.com/.insteadof git@github.com:\nurl.https://github.com/.insteadof ssh://git@github.com/",
+        )),
+    )
+    .await;
+
+    assert!(writes(&commands).is_empty(), "{commands:?}");
+}
+
+/// Without the GitHub account or a Git identity, setup leaves Git alone.
+#[tokio::test(flavor = "local")]
+async fn linux_setup_without_the_github_account_runs_no_git() {
+    assert!(git_commands_during_setup(false, None).await.is_empty());
+}
+
+/// Runs Linux setup for an agent with `instructions` as its own instructions file, if any, on a
+/// host whose instructions file holds `host`, if it exists, and returns the `CLAUDE.md` written.
+async fn claude_instructions_after_setup(host: Option<&str>, instructions: Option<&str>) -> Option<String> {
+    let directory = TempDir::new().expect("temporary directory");
+    let host_path = directory.path().join("host-instructions.md");
+    if let Some(host) = host {
+        std::fs::write(&host_path, host).expect("host instructions");
+    }
+    let mut resource = support::agent("worker");
+    resource.metadata.generation = 1;
+    resource.spec.home = None;
+    resource.spec.instructions.clear();
+    if let Some(instructions) = instructions {
+        std::fs::write(directory.path().join("instructions.md"), instructions).expect("instructions");
+        resource.spec.instructions.push(agent::InstructionsSpec {
+            source: PathBuf::from("instructions.md"),
+        });
+    }
+    let record = AgentRecord {
+        id: "7b1e2c3d-4f5a-4b6c-8d7e-9f0a1b2c3d4e".parse().expect("Agent ID"),
+        source_directory: directory.path().to_path_buf(),
+        manifest_path: None,
+        env_file: None,
+        agent: resource,
+    };
+    let backend = Rc::new(memory::Provider::new());
+    backend.queue_execution_events_matching(is_claude_version, answers("2.1.266 (Claude Code)\n", 0));
+    backend.queue_execution_events_matching(is_podman_presence_check, completed(1));
+    let service = SandboxService::new(backend.clone());
+    let spec = record
+        .agent
+        .spec
+        .sandbox
+        .resolve_from(&record.source_directory, &Platform::native("linux").architecture);
+    let sandbox = service
+        .ensure(&EnsureSandboxRequest::new(
+            record.sandbox_name().expect("Sandbox name"),
+            spec,
+        ))
+        .await
+        .expect("Sandbox");
+
+    Linux::new(PLATFORM_API_URL)
+        .with_host_instructions(&host_path)
+        .setup(&record, &sandbox, &declared(&record), &setup_phase())
+        .await
+        .expect("setup");
+
+    let written = backend
+        .file_writes()
+        .iter()
+        .any(|path| path.as_str() == "/home/agent/.claude/CLAUDE.md");
+    if written {
+        Some(String::from_utf8(read_file(&sandbox, "/home/agent/.claude/CLAUDE.md").await).expect("UTF-8"))
+    } else {
+        None
+    }
+}
+
+/// The host's instructions reach every agent, ahead of the agent's own.
+#[tokio::test(flavor = "local")]
+async fn linux_setup_puts_the_host_instructions_ahead_of_the_agents_own() {
+    assert_eq!(
+        claude_instructions_after_setup(Some("Host rules\n"), Some("Repository rules\n")).await,
+        Some("Host rules\n\nRepository rules\n".to_owned())
+    );
+    assert_eq!(
+        claude_instructions_after_setup(Some("Host rules\n"), None).await,
+        Some("Host rules\n".to_owned()),
+        "an agent without instructions of its own still gets the host's"
+    );
+    assert_eq!(
+        claude_instructions_after_setup(None, Some("Repository rules\n")).await,
+        Some("Repository rules\n".to_owned()),
+        "no host file changes nothing"
+    );
+}
+
+/// Emptying the host's file clears what agents were given; without any instructions nothing is written.
+#[tokio::test(flavor = "local")]
+async fn an_empty_host_file_clears_the_instructions_and_none_at_all_writes_nothing() {
+    assert_eq!(
+        claude_instructions_after_setup(Some(""), None).await,
+        Some(String::new())
+    );
+    assert_eq!(claude_instructions_after_setup(None, None).await, None);
+}
+
+/// Runs Linux setup for a Claude Code agent whose Claude Code state file holds `existing`, if
+/// any, and returns the state file afterwards and whether setup wrote it.
+async fn claude_state_after_setup(existing: Option<&str>) -> (Option<serde_json::Value>, bool) {
+    const STATE: &str = "/home/agent/.claude/.claude.json";
+    let directory = TempDir::new().expect("temporary directory");
+    std::fs::write(directory.path().join("instructions.md"), "test instructions\n").expect("instruction file");
+    let mut resource = support::agent("worker");
+    resource.metadata.generation = 1;
+    resource.spec.home = None;
+    let record = AgentRecord {
+        id: "8c2d3e4f-5a6b-4c7d-9e8f-0a1b2c3d4e5f".parse().expect("Agent ID"),
+        source_directory: directory.path().to_path_buf(),
+        manifest_path: None,
+        env_file: None,
+        agent: resource,
+    };
+    let backend = Rc::new(memory::Provider::new());
+    backend.queue_execution_events_matching(is_claude_version, answers("2.1.266 (Claude Code)\n", 0));
+    backend.queue_execution_events_matching(is_podman_presence_check, completed(1));
+    let present = existing.is_some();
+    backend.queue_execution_events_matching(
+        |spec| {
+            matches!(spec.program(), Program::Command { executable, args }
+                if executable.as_str() == "/usr/bin/test" && args == &["-e", STATE])
+        },
+        completed(i32::from(!present)),
+    );
+    let service = SandboxService::new(backend.clone());
+    let spec = record
+        .agent
+        .spec
+        .sandbox
+        .resolve_from(&record.source_directory, &Platform::native("linux").architecture);
+    let sandbox = service
+        .ensure(&EnsureSandboxRequest::new(
+            record.sandbox_name().expect("Sandbox name"),
+            spec,
+        ))
+        .await
+        .expect("Sandbox");
+    if let Some(existing) = existing {
+        sandbox
+            .write_file(
+                &SandboxPath::new(STATE),
+                Box::pin(Cursor::new(existing.as_bytes().to_vec())),
+            )
+            .await
+            .expect("existing state");
+    }
+    let before = backend.file_writes().len();
+
+    Linux::new(PLATFORM_API_URL)
+        .setup(&record, &sandbox, &declared(&record), &setup_phase())
+        .await
+        .expect("setup");
+
+    let written = backend.file_writes()[before..]
+        .iter()
+        .any(|path| path.as_str() == STATE);
+    let state = serde_json::from_slice(&read_file(&sandbox, STATE).await).ok();
+    (state, written)
+}
+
+/// A session starts at Claude Code's prompt: a sandbox without Claude Code state yet gets one
+/// with the first-run questions answered, whatever image and manifest the agent has.
+#[tokio::test(flavor = "local")]
+async fn linux_setup_answers_claude_codes_first_run_questions_for_a_new_sandbox() {
+    let (state, written) = claude_state_after_setup(None).await;
+    let state = state.expect("a new state file");
+    assert!(written);
+    assert_eq!(state["hasCompletedOnboarding"], true);
+    assert_eq!(state["bypassPermissionsModeAccepted"], true);
+    assert_eq!(
+        state["projects"][agent::sandbox::platform::WORKING_DIRECTORY]["hasTrustDialogAccepted"],
+        true
+    );
+}
+
+/// Claude Code's existing state is the image's or the user's, and is never rewritten.
+#[tokio::test(flavor = "local")]
+async fn linux_setup_never_rewrites_existing_claude_state() {
+    for existing in [r#"{"numStartups":3,"theme":"dark"}"#, "not JSON"] {
+        let (_, written) = claude_state_after_setup(Some(existing)).await;
+        assert!(!written, "{existing}");
+    }
+}
+
+/// An Agent without `spec.home` copies nothing into the guest home, but is otherwise set up.
+#[tokio::test(flavor = "local")]
+async fn linux_setup_without_a_home_copies_nothing_into_the_guest_home() {
+    let directory = TempDir::new().expect("temporary directory");
+    std::fs::write(directory.path().join("instructions.md"), "test instructions\n").expect("instruction file");
+    let mut resource = support::agent("worker");
+    resource.metadata.generation = 1;
+    resource.spec.home = None;
+    let record = AgentRecord {
+        id: "0d9b5f5e-8a8f-4d0e-9a51-5b1f6f0c2a37".parse().expect("Agent ID"),
+        source_directory: directory.path().to_path_buf(),
+        manifest_path: None,
+        env_file: None,
+        agent: resource,
+    };
+    let backend = Rc::new(memory::Provider::new());
+    backend.queue_execution_events_matching(
+        is_claude_version,
+        vec![
+            ExecutionEvent::Started { process_id: None },
+            ExecutionEvent::Stdout("2.1.266 (Claude Code)\n".into()),
+            ExecutionEvent::Exited(ExitStatus { code: 0 }),
+        ],
+    );
+    backend.queue_execution_events_matching(is_podman_presence_check, completed(1));
+    let service = SandboxService::new(backend.clone());
+    let spec = record
+        .agent
+        .spec
+        .sandbox
+        .resolve_from(&record.source_directory, &Platform::native("linux").architecture);
+    let sandbox = service
+        .ensure(&EnsureSandboxRequest::new(
+            record.sandbox_name().expect("Sandbox name"),
+            spec,
+        ))
+        .await
+        .expect("Sandbox");
+
+    Linux::new(PLATFORM_API_URL)
+        .setup(&record, &sandbox, &declared(&record), &setup_phase())
+        .await
+        .expect("setup without a home");
+
+    let writes = backend
+        .file_writes()
+        .into_iter()
+        .map(|path| path.as_str().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        !writes.iter().any(|path| path == "/tmp/agent-home.tar"),
+        "no home archive is written: {writes:?}"
+    );
+    assert!(
+        writes.iter().any(|path| path == "/home/agent/.claude/CLAUDE.md"),
+        "the harness is still configured: {writes:?}"
+    );
+}
+
 #[tokio::test(flavor = "local")]
 #[allow(clippy::too_many_lines)]
 async fn linux_setup_rewrites_configuration_without_owning_workspace_initialization() {
@@ -182,7 +555,7 @@ async fn linux_setup_rewrites_configuration_without_owning_workspace_initializat
     let agent_id: AgentId = "38f41de4-6ff7-4679-ae46-678bc61e4dcb".parse().expect("Agent ID");
     let mut resource = support::agent("worker");
     resource.metadata.generation = 1;
-    resource.spec.home.source = home;
+    resource.spec.home = Some(HomeSpec { source: home });
     resource.spec.skills = vec![agent::SkillSpec {
         source: PathBuf::from("skills/evidence"),
         name: None,
@@ -299,7 +672,7 @@ async fn linux_setup_waits_for_systemd_and_restores_managed_podman_configuration
     let agent_id: AgentId = "38f41de4-6ff7-4679-ae46-678bc61e4dcb".parse().expect("Agent ID");
     let mut resource = support::agent("worker");
     resource.metadata.generation = 1;
-    resource.spec.home.source = home;
+    resource.spec.home = Some(HomeSpec { source: home });
     let record = AgentRecord {
         id: agent_id,
         source_directory: directory.path().to_path_buf(),
@@ -383,7 +756,7 @@ async fn linux_setup_accepts_any_installed_version_when_none_is_declared() {
     let agent_id: AgentId = "38f41de4-6ff7-4679-ae46-678bc61e4dcb".parse().expect("Agent ID");
     let mut resource = support::agent("worker");
     resource.metadata.generation = 1;
-    resource.spec.home.source = home;
+    resource.spec.home = Some(HomeSpec { source: home });
     resource.spec.harnesses[0].version = None;
     let record = AgentRecord {
         id: agent_id,
@@ -433,7 +806,7 @@ async fn linux_setup_points_harness_hooks_at_the_current_platform_api_url() {
     std::fs::write(directory.path().join("instructions.md"), "test instructions").expect("instruction file");
     let mut resource = support::agent("worker");
     resource.metadata.generation = 1;
-    resource.spec.home.source = home;
+    resource.spec.home = Some(HomeSpec { source: home });
     resource.spec.harnesses[0].version = None;
     let record = AgentRecord {
         id: "38f41de4-6ff7-4679-ae46-678bc61e4dcb".parse().expect("Agent ID"),
@@ -498,7 +871,7 @@ async fn linux_setup_rejects_partial_git_identity() {
     std::fs::create_dir_all(&home).expect("home directory");
     let mut resource = support::agent("worker");
     resource.metadata.generation = 1;
-    resource.spec.home.source = home;
+    resource.spec.home = Some(HomeSpec { source: home });
     resource.spec.instructions.clear();
     let record = AgentRecord {
         id: "38f41de4-6ff7-4679-ae46-678bc61e4dcb".parse().expect("Agent ID"),
@@ -547,7 +920,7 @@ async fn linux_setup_rejects_a_declared_harness_version_mismatch_before_injectio
     let agent_id: AgentId = "38f41de4-6ff7-4679-ae46-678bc61e4dcb".parse().expect("Agent ID");
     let mut resource = support::agent("worker");
     resource.metadata.generation = 1;
-    resource.spec.home.source = home;
+    resource.spec.home = Some(HomeSpec { source: home });
     let record = AgentRecord {
         id: agent_id,
         source_directory: PathBuf::from(directory.path()),
@@ -616,7 +989,7 @@ async fn linux_setup_rejects_a_skill_tree_with_a_fifo_instead_of_blocking() {
     assert!(status.success());
     let mut resource = support::agent("worker");
     resource.metadata.generation = 1;
-    resource.spec.home.source = home;
+    resource.spec.home = Some(HomeSpec { source: home });
     resource.spec.instructions.clear();
     resource.spec.skills = vec![agent::SkillSpec {
         source: PathBuf::from("skills/evidence"),

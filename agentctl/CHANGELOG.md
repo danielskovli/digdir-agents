@@ -12,6 +12,26 @@ Agents. The Rust workspace version is a build detail and is not tracked here.
 
 ## [Unreleased]
 
+### Added
+
+- `agentctl instructions edit` sets instructions that every agent on this host receives ahead of its own, such as how you track work. ([agentctl](https://github.com/digdir/digdir-agents/tree/main/agentctl#images-home-and-harnesses))
+- Sessions know where they run: `AGENT_NAME`, `AGENT_SESSION_NAME`, `AGENT_HOST` and `AGENT_SOURCE_DIRECTORY` are set for the harness, so instructions can ask an agent to name itself. ([agentctl](https://github.com/digdir/digdir-agents/tree/main/agentctl#agent-layer))
+- Inside an agent, `agent-session` lists its sessions by name and `agent-session NAME` attaches to one. Shells opened with `agentctl ssh` start with a short reminder of the tmux keys, and the tmux status bar shows the session's name and how to detach. ([agentctl](https://github.com/digdir/digdir-agents/tree/main/agentctl#agent-layer))
+- `agentctl status` shows agentd, your Claude Code, Codex and GitHub logins and the current directory's agent at a glance; `agentctl claude status` and `agentctl codex status` check one login. ([install](https://github.com/digdir/digdir-agents/tree/main/agentctl#install))
+- `agentctl init` sets up an Agent for the repository you are in: it signs you in where needed, writes an `agents/<kind>/` directory, named for the kind of agent you choose, when the repository has no agent, creates the agent and offers to open a session. The directory holds a manifest with the settings you are likely to change later, a variant that works on your checkout instead of a clone, instructions, a home overlay and an `.env` sample, and a Dockerfile for what you want the agent to do, from writing code to using a desktop, that installs the Node.js, .NET, Go, Rust, Python and Java versions the repository declares. The agent gets a size that fits your machine's CPUs, memory and free disk. ([install](https://github.com/digdir/digdir-agents/tree/main/agentctl#install))
+- `agents/base-ubuntu` holds general agent images in four stages, each adding to the one before: `basic` (systemd, OpenSSH, Claude Code, Codex, Node.js, Git and the GitHub CLI, cloning the repositories in `/etc/agent/repositories` at first boot), `developer` (Podman with `docker` and `docker compose`), `web` (a headless Chromium through Playwright) and `desktop` (a desktop over VNC). `basic` is published as `agentctl-base-ubuntu`, and `agentctl init` builds agent images from the stage you choose. ([base image](https://github.com/digdir/digdir-agents/tree/main/agents/base-ubuntu))
+- `agentctl github login` walks you through creating a fine-grained GitHub token for Agents, one per organization, separate from your own `gh` login, checks what it can do before storing it, and `agentctl github list`, `logout` and `reset` show and remove them. Agents whose manifest lists `accounts: [{type: github, owner: …}]` use it for `gh`, `git push` and the GitHub API and commit as its account, with no `.env` file. ([GitHub accounts](https://github.com/digdir/digdir-agents/tree/main/agentctl#github-accounts))
+
+### Changed
+
+- `attach`, `exec`, `ssh` and the other commands that use the current directory's agent find one defined in a subdirectory, such as `agents/<name>/`, from anywhere in its repository. ([agentctl](https://github.com/digdir/digdir-agents/tree/main/agentctl#agent-layer))
+- `agentctl` on its own, and `attach`, `exec` or `ssh` in a directory without an Agent, ask whether to open or set up the Agent there, instead of only printing help or an error. ([install](https://github.com/digdir/digdir-agents/tree/main/agentctl#install))
+- An Agent manifest no longer needs `home` or `network`: without `home` nothing is copied into `/home/agent`, and without `network` all traffic goes through the host's network mediator, as before.
+
+### Fixed
+
+- A new agent's first session starts at Claude Code's prompt instead of its theme picker, security notes, folder trust question and bypass-permissions warning, whatever image the agent uses. ([agentctl](https://github.com/digdir/digdir-agents/tree/main/agentctl#images-home-and-harnesses))
+
 ## [0.1.0-preview.11] - 2026-10-12
 
 ### Changed

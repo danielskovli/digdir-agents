@@ -200,8 +200,9 @@ pub struct Spec {
     pub run_state: Option<RunState>,
     /// Generic sandbox configuration mapped to the lower-layer SDK.
     pub sandbox: SandboxManifestSpec,
-    /// Host directory synchronized into the sandbox user's home at bootstrap.
-    pub home: HomeSpec,
+    /// Host directory synchronized into the sandbox user's home at bootstrap, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<HomeSpec>,
     /// Agent-wide guidance installed through every declared Harness Adapter, concatenated in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub instructions: Vec<InstructionsSpec>,
@@ -219,7 +220,11 @@ pub struct Spec {
     /// Ways the Agent's user reaches into the Sandbox besides Sessions and `exec`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub access: Vec<AccessSpec>,
-    /// Sandbox egress mediation policy.
+    /// Host accounts the Agent acts as, each signed in once on the host with `agentctl`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<AccountSpec>,
+    /// Sandbox egress mediation policy; mediated with every host allowed when omitted.
+    #[serde(default)]
     pub network: NetworkSpec,
 }
 
@@ -249,6 +254,23 @@ pub enum AccessSpec {
     Ssh {},
     /// VNC access to the desktop the image runs, reached through `agentctl vnc`.
     Vnc {},
+}
+
+/// One host account an Agent acts as.
+///
+/// The platform owns the credential, its placeholder and the hosts it is
+/// substituted for; a manifest only says which account.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase", tag = "type")]
+pub enum AccountSpec {
+    /// A GitHub token stored by `agentctl github login`: a mediated `GITHUB_TOKEN` for GitHub's
+    /// hosts, and the token's account name and email for Git commits.
+    Github {
+        /// The user or organization whose token the Agent uses; the host's fallback token when
+        /// it has none for this owner. Omitted, the only stored token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+    },
 }
 
 /// Sandbox settings as supplied by an Agent manifest.
@@ -469,6 +491,22 @@ impl Spec {
         self.access.contains(&AccessSpec::Vnc {})
     }
 
+    /// Returns whether the Agent acts as a GitHub account.
+    #[must_use]
+    pub fn github_account(&self) -> bool {
+        self.accounts
+            .iter()
+            .any(|account| matches!(account, AccountSpec::Github { .. }))
+    }
+
+    /// Returns the owner whose GitHub token the Agent uses, when the manifest names one.
+    #[must_use]
+    pub fn github_owner(&self) -> Option<&str> {
+        self.accounts.iter().find_map(|account| match account {
+            AccountSpec::Github { owner } => owner.as_deref(),
+        })
+    }
+
     fn validate(&self) -> Result<(), Error> {
         let mut mount_targets = std::collections::BTreeSet::new();
         for (index, mount) in self.sandbox.mounts.iter().enumerate() {
@@ -486,7 +524,11 @@ impl Spec {
                 )));
             }
         }
-        if self.home.source.as_os_str().is_empty() {
+        if self
+            .home
+            .as_ref()
+            .is_some_and(|home| home.source.as_os_str().is_empty())
+        {
             return Err(Error::Invalid("spec.home.source must not be empty".into()));
         }
         if let Some(index) = self
@@ -535,6 +577,19 @@ impl Spec {
                 "spec.access[{index}] duplicates an access capability"
             )));
         }
+        let mut accounts = std::collections::HashSet::new();
+        if let Some(index) = self
+            .accounts
+            .iter()
+            .position(|account| !accounts.insert(std::mem::discriminant(account)))
+        {
+            return Err(Error::Invalid(format!("spec.accounts[{index}] duplicates an account")));
+        }
+        if let Some(owner) = self.github_owner().filter(|owner| !crate::github::valid_owner(owner)) {
+            return Err(Error::Invalid(format!(
+                "spec.accounts: {owner:?} is not a GitHub user or organization"
+            )));
+        }
         if self.network.deny.iter().any(|host| !valid_host_pattern(host)) {
             return Err(Error::Invalid(
                 "spec.network.deny contains an invalid host pattern".into(),
@@ -577,6 +632,8 @@ impl Spec {
                         secret.placeholder.as_deref(),
                     )
                 })
+                || (self.github_account()
+                    && crate::github::conflicts_with_managed_secret(&secret.environment, secret.placeholder.as_deref()))
                 || secret.allowed_hosts.is_empty()
                 || !environments.insert(&secret.environment)
                 || !placeholders.insert(placeholder)
@@ -602,10 +659,11 @@ impl Spec {
                     .harnesses
                     .iter()
                     .any(|installation| harness::manages_environment(installation.kind, &variable.name))
+                || (self.github_account() && variable.name == crate::github::ACCESS_ENVIRONMENT)
                 || !names.insert(variable.name.as_str())
             {
                 return Err(Error::Invalid(format!(
-                    "spec.environment[{index}] is invalid, duplicated, or managed by a declared harness"
+                    "spec.environment[{index}] is invalid, duplicated, or managed by a declared harness or account"
                 )));
             }
         }
@@ -749,23 +807,25 @@ impl SecretSpec {
 }
 
 /// Required network mediation mode.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum NetworkMode {
     /// Route sandbox traffic through the trusted mediation backend.
+    #[default]
     Mediated,
 }
 
 /// Baseline egress policy.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum NetworkAllow {
     /// Permit network operations except explicitly denied hosts.
+    #[default]
     All,
 }
 
 /// Agent-layer network policy interpreted by the host Policy Engine.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NetworkSpec {
     /// Required mediation mode.
