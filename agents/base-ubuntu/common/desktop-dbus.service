@@ -1,6 +1,6 @@
 [Unit]
 Description=D-Bus session bus for the Agent desktop
-Documentation=https://github.com/digdir/digdir-agents/tree/main/agents/self-dev
+Documentation=https://github.com/digdir/digdir-agents/tree/main/agents/base-ubuntu
 # The socket lives in the runtime directory tmpfiles creates.
 After=systemd-tmpfiles-setup.service
 

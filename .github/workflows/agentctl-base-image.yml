@@ -1,4 +1,5 @@
-# Builds the general Agent base image from agents/base-ubuntu, which `agentctl init` writes Dockerfiles on top of.
+# Builds the general Agent base image, the `basic` stage of agents/base-ubuntu, whose stages `agentctl init` copies into
+# the Dockerfiles it writes.
 # Pull requests only build it; main, including a manual run on main, also publishes it to GHCR as `latest` and
 # `sha-<commit>`.
 name: agentctl base image
@@ -69,20 +70,24 @@ jobs:
           set -eu
 
           repository="${REGISTRY}/agentctl-base-ubuntu"
-          set --
+          build() {
+            docker buildx build \
+              --provenance=false \
+              --sbom=false \
+              --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+              --cache-from "type=registry,ref=${repository}:buildcache" \
+              --platform linux/amd64,linux/arm64 \
+              "$@" \
+              "${CONTEXT}"
+          }
+
+          # Every stage is checked, since `agentctl init` copies each one into the Dockerfiles it
+          # writes; only `basic` is published.
+          build --target desktop
           if [ "${PUBLISH}" = "true" ]; then
-            set -- \
+            build --target basic \
               --tag "${repository}:sha-${GITHUB_SHA::10}" \
               --tag "${repository}:latest" \
               --push \
               --cache-to "type=registry,ref=${repository}:buildcache,mode=max,image-manifest=true"
           fi
-
-          docker buildx build \
-            --provenance=false \
-            --sbom=false \
-            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-            --cache-from "type=registry,ref=${repository}:buildcache" \
-            --platform linux/amd64,linux/arm64 \
-            "$@" \
-            "${CONTEXT}"
