@@ -13,7 +13,7 @@ mod sizing;
 mod template;
 mod toolchains;
 
-use template::{Checkout, Choices, Github, IMAGE_DIRECTORY, Image};
+use template::{Checkout, Choices, Github, Image};
 
 /// Sets up an Agent for the current directory, returning its name once it is Ready, or `None`
 /// when the user declined a step.
@@ -39,77 +39,154 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client) -> CommandResu
         status = client.auth_status().await?;
     }
     let github = github_account(client, &status).await;
-    if crate::tui::working_tree_manifests(&directory).is_empty() {
-        let manifest = manifest_location(&directory);
-        let root = manifest.parent().unwrap_or(&directory);
-        if manifest.exists() {
-            // Discovery honours ignore files, so an ignored manifest is not offered; never replace it.
-            return Err(Error::Invalid(format!(
-                "{} exists but is ignored by Git, so `agentctl init` cannot offer it; run `agentctl apply -f {}`",
-                manifest.display(),
-                manifest.display()
-            ))
-            .into());
-        }
-        if !prompt::confirm(&format!("No agent manifest here. Write {}?", manifest.display()))? {
+    let name = if crate::tui::working_tree_manifests(&directory).is_empty() {
+        let Some(manifest) = write_agent_directory(home, &directory, &github, &status)? else {
             return Ok(None);
-        }
-        let toolchains = toolchains::detect(root);
-        let image = choose_image(&toolchains)?;
-        let checkout = choose_checkout(root, image)?;
-        let size = choose_size(home.path())?;
-        let choices = Choices {
-            name: agent_name(root),
-            github,
-            image,
-            checkout,
-            size,
         };
-        let dockerfile = match image {
-            Image::Base => None,
-            Image::Built => Some(write_dockerfile(
-                root,
-                &template::dockerfile(&choices.checkout, &toolchains),
-            )?),
-        };
-        write_new(&manifest, &template::manifest(&choices, &status))?;
-        eprintln!("Wrote {}.", manifest.display());
-        let question = if dockerfile.is_some() {
-            "Edit agent.yaml and the Dockerfile before creating the agent?"
-        } else {
-            "Edit agent.yaml before creating the agent?"
-        };
-        if prompt::confirm_lines(&[
-            "The image, resources, mounts and access cannot change once the agent exists.",
-            question,
-        ])? && !edit_manifest(&manifest, dockerfile.as_deref())?
-        {
-            return Ok(None);
-        }
-    }
-    let manifests = crate::tui::working_tree_manifests(&directory);
-    let name = if let [manifest] = manifests.as_slice() {
-        create_from(client, manifest).await?
+        create_from(client, &manifest).await?
     } else {
-        eprintln!();
-        eprintln!("This repository has several agent manifests. Choose one, and a name, in the form that opens next.");
-        prompt::wait_for_enter("Press Enter to open it…")?;
-        let Some(name) = crate::tui::create_agent_here(home, client).await? else {
-            return Ok(None);
-        };
-        name
+        let manifests = crate::tui::working_tree_manifests(&directory);
+        if let [manifest] = manifests.as_slice() {
+            create_from(client, manifest).await?
+        } else {
+            eprintln!();
+            eprintln!(
+                "This repository has several agent manifests. Choose one, and a name, in the form that opens next."
+            );
+            prompt::wait_for_enter("Press Enter to open it…")?;
+            let Some(name) = crate::tui::create_agent_here(home, client).await? else {
+                return Ok(None);
+            };
+            name
+        }
     };
     crate::wait_until_converged(client, &name, std::time::Duration::from_mins(10)).await?;
     eprintln!("The agent {name} is ready.");
     Ok(Some(name))
 }
 
-/// Opens `manifest` in `$VISUAL` or `$EDITOR`, or asks for it to be edited elsewhere, until it is
-/// a valid manifest. Returns `false` when the person gives up on an invalid one.
-fn edit_manifest(manifest: &Path, dockerfile: Option<&Path>) -> Result<bool, Error> {
+/// Asks what the new agent needs and writes its directory, `agents/<name>/` at the repository
+/// root, returning the manifest to create the agent from, or `None` when the person declined.
+fn write_agent_directory(
+    home: &ControlPlaneHome,
+    directory: &Path,
+    github: &Github,
+    status: &AuthenticationStatus,
+) -> Result<Option<PathBuf>, Error> {
+    let root = crate::tui::repository_root(directory)
+        .unwrap_or(directory)
+        .to_path_buf();
+    let name = agent_name(&root);
+    let folder = root.join(template::AGENTS_DIRECTORY).join(&name);
+    if folder.exists() {
+        // Discovery honours ignore files, so an ignored manifest is not offered; never replace it.
+        return Err(Error::Invalid(format!(
+            "{} exists but Git offers no agent manifest in it; create the agent with `agentctl apply -f` or move it aside",
+            folder.display()
+        )));
+    }
+    if !prompt::confirm(&format!("No agent here. Set one up in {}?", folder.display()))? {
+        return Ok(None);
+    }
+    let toolchains = toolchains::detect(&root);
+    let image = choose_image(&toolchains)?;
+    let (checkout, worktree) = choose_checkout(&root, image)?;
+    let size = choose_size(home.path())?;
+    let workspace = match &checkout {
+        Checkout::Clone(repository) => repository_directory(repository).unwrap_or_else(|| name.clone()),
+        Checkout::Mount => name.clone(),
+    };
+    let choices = Choices {
+        name,
+        workspace,
+        github: github.clone(),
+        image,
+        checkout,
+        size,
+        skills: repository_skills(&root),
+    };
+
+    std::fs::create_dir_all(folder.join("home"))?;
+    let manifest = folder.join(agent::manifest::MANIFEST_FILE);
+    let mut written = vec![(manifest.clone(), template::manifest(&choices, status))];
+    if matches!(choices.checkout, Checkout::Clone(_)) {
+        written.push((
+            folder.join(template::WORKTREE_VARIANT),
+            template::worktree_variant(&choices),
+        ));
+    }
+    let dockerfile = folder.join("Dockerfile");
+    if image == Image::Built {
+        written.push((dockerfile.clone(), template::dockerfile(&choices.checkout, &toolchains)));
+        written.push((folder.join(".dockerignore"), template::DOCKERIGNORE.to_owned()));
+    }
+    let instructions = folder.join("instructions.md");
+    written.extend([
+        (instructions.clone(), template::instructions(&choices)),
+        (folder.join(".env.sample"), template::ENV_SAMPLE.to_owned()),
+        (folder.join(".gitignore"), template::GITIGNORE.to_owned()),
+        (folder.join("home").join(".gitkeep"), String::new()),
+    ]);
+    for (path, contents) in &written {
+        write_new(path, contents)?;
+    }
+    eprintln!("Wrote {}:", folder.display());
+    for (path, _) in &written {
+        if let Ok(relative) = path.strip_prefix(&folder) {
+            eprintln!("  {}", relative.display());
+        }
+    }
+    let chosen = if worktree {
+        folder.join(template::WORKTREE_VARIANT)
+    } else {
+        manifest.clone()
+    };
+    let mut editable = vec![manifest.as_path()];
+    if image == Image::Built {
+        editable.push(&dockerfile);
+    }
+    editable.push(&instructions);
+    let question = if image == Image::Built {
+        "Edit agent.yaml, the Dockerfile and instructions.md before creating the agent?"
+    } else {
+        "Edit agent.yaml and instructions.md before creating the agent?"
+    };
+    if prompt::confirm_lines(&[
+        "The image, resources, mounts and access cannot change once the agent exists.",
+        question,
+    ])? && !edit_manifest(&chosen, &editable)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(chosen))
+}
+
+/// The directory a clone of `repository` lands in: its last path segment without `.git`.
+fn repository_directory(repository: &str) -> Option<String> {
+    let name = repository.trim_end_matches('/').rsplit(['/', ':']).next()?;
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// The repository's own skills: each directory under `.claude/skills` with a `SKILL.md`, relative
+/// to `root`, in name order.
+fn repository_skills(root: &Path) -> Vec<String> {
+    let mut skills: Vec<String> = std::fs::read_dir(root.join(".claude").join("skills"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().join("SKILL.md").is_file())
+        .filter_map(|entry| entry.file_name().to_str().map(|name| format!(".claude/skills/{name}")))
+        .collect();
+    skills.sort();
+    skills
+}
+
+/// Opens `files` in `$VISUAL` or `$EDITOR`, or asks for them to be edited elsewhere, until
+/// `manifest` is valid. Returns `false` when the person gives up on an invalid one.
+fn edit_manifest(manifest: &Path, files: &[&Path]) -> Result<bool, Error> {
     loop {
-        let files: Vec<&Path> = std::iter::once(manifest).chain(dockerfile).collect();
-        prompt::edit_files(&files)?;
+        prompt::edit_files(files)?;
         match agent::manifest::resolve(manifest) {
             Ok(_) => return Ok(true),
             Err(error) => {
@@ -117,10 +194,7 @@ fn edit_manifest(manifest: &Path, dockerfile: Option<&Path>) -> Result<bool, Err
                     Error::Invalid(reason) => reason,
                     error => error.to_string(),
                 };
-                if !prompt::confirm_lines(&[
-                    &format!("agent.yaml is not a valid manifest: {reason}"),
-                    "Edit it again?",
-                ])? {
+                if !prompt::confirm_lines(&[&format!("The manifest is not valid: {reason}"), "Edit it again?"])? {
                     eprintln!("Fix {} and run `agentctl init` again.", manifest.display());
                     return Ok(false);
                 }
@@ -148,19 +222,20 @@ fn choose_image(toolchains: &[toolchains::Toolchain]) -> Result<Image, Error> {
         );
         return Ok(Image::Base);
     }
-    let found = if toolchains.is_empty() {
-        "nothing beyond the base image found".to_owned()
+    let built = if toolchains.is_empty() {
+        "Built with Docker here from a Dockerfile to extend: no toolchains found beyond the base image (recommended)"
+            .to_owned()
     } else {
-        toolchains
-            .iter()
-            .map(toolchains::Toolchain::describe)
-            .collect::<Vec<_>>()
-            .join(", ")
+        format!(
+            "Built with Docker here: the base image plus {} (recommended)",
+            toolchains
+                .iter()
+                .map(toolchains::Toolchain::describe)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     };
-    let options = [
-        format!("Built for this repository with Docker here: the base image plus {found} (recommended)"),
-        "The published base image as it is: no build".to_owned(),
-    ];
+    let options = [built, "The published base image as it is: no build".to_owned()];
     Ok(
         match prompt::choose("Which image should the agent run?", &options, Some(0))? {
             Some(1) => Image::Base,
@@ -169,31 +244,34 @@ fn choose_image(toolchains: &[toolchains::Toolchain]) -> Result<Image, Error> {
     )
 }
 
-/// Asks whether the agent clones the repository or works on this checkout. Only a built image
-/// can clone, and only a repository with a remote can be cloned.
-fn choose_checkout(root: &Path, image: Image) -> Result<Checkout, Error> {
+/// Asks whether the agent clones the repository or works on this checkout, returning
+/// `agent.yaml`'s checkout and whether to create the agent from the worktree variant instead.
+/// Only a built image can clone, and only a repository with a remote can be cloned.
+fn choose_checkout(root: &Path, image: Image) -> Result<(Checkout, bool), Error> {
     if image == Image::Base {
         eprintln!("The base image clones nothing, so the agent works on this checkout.");
-        return Ok(Checkout::Mount);
+        return Ok((Checkout::Mount, false));
     }
     let Some(remote) = remote(root) else {
         eprintln!("This checkout has no remote to clone, so the agent works on it directly.");
-        return Ok(Checkout::Mount);
+        return Ok((Checkout::Mount, false));
     };
     let options = [
         format!("A fresh clone of {remote}, made in the agent (recommended)"),
-        "This checkout, shared with the agent: its changes land on this machine directly".to_owned(),
+        format!(
+            "This checkout, shared with the agent: its changes land on this machine directly ({})",
+            template::WORKTREE_VARIANT
+        ),
     ];
-    Ok(
-        match prompt::choose(
+    let worktree = prompt::choose_lines(
+        &[
             "Which copy of the repository should the agent work on?",
-            &options,
-            Some(0),
-        )? {
-            Some(1) => Checkout::Mount,
-            _ => Checkout::Clone(remote),
-        },
-    )
+            "Both are written, so the other can be created later from the same directory.",
+        ],
+        &options,
+        Some(0),
+    )? == Some(1);
+    Ok((Checkout::Clone(remote), worktree))
 }
 
 /// The repository to clone: `owner/name` on GitHub, else the `origin` remote's URL.
@@ -250,20 +328,6 @@ fn choose_size(state: &Path) -> Result<sizing::Size, Error> {
         Some(1) => recommended.smaller(),
         _ => recommended,
     })
-}
-
-/// Writes the built image's Dockerfile under `root`, or keeps one that is already there.
-fn write_dockerfile(root: &Path, contents: &str) -> Result<PathBuf, Error> {
-    let directory = root.join(IMAGE_DIRECTORY);
-    let dockerfile = directory.join("Dockerfile");
-    if dockerfile.exists() {
-        eprintln!("Using the existing {}.", dockerfile.display());
-        return Ok(dockerfile);
-    }
-    std::fs::create_dir_all(&directory)?;
-    write_new(&dockerfile, contents)?;
-    eprintln!("Wrote {}.", dockerfile.display());
-    Ok(dockerfile)
 }
 
 /// Creates `path` with `contents`, refusing to replace a file that appeared meanwhile.
@@ -420,14 +484,6 @@ fn agent_name(root: &Path) -> String {
     }
 }
 
-/// Where a new manifest for `directory` goes: the repository root, so the Agent is found from
-/// anywhere in the checkout, or `directory` itself outside a repository.
-fn manifest_location(directory: &Path) -> PathBuf {
-    crate::tui::repository_root(directory)
-        .unwrap_or(directory)
-        .join(agent::manifest::MANIFEST_FILE)
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -444,16 +500,38 @@ mod tests {
     }
 
     #[test]
-    fn the_dockerfile_is_written_once_and_an_existing_one_is_kept() {
-        let directory = tempfile::TempDir::new().expect("temporary directory");
-        let written = write_dockerfile(directory.path(), "FROM base\n").expect("written");
-        assert_eq!(written, directory.path().join(".agentctl").join("Dockerfile"));
-        std::fs::write(&written, "FROM mine\n").expect("customized");
+    fn a_clone_lands_in_its_repository_name() {
         assert_eq!(
-            write_dockerfile(directory.path(), "FROM base\n").expect("kept"),
-            written
+            repository_directory("digdir/digdir-agents").as_deref(),
+            Some("digdir-agents")
         );
-        assert_eq!(std::fs::read_to_string(&written).expect("read"), "FROM mine\n");
+        assert_eq!(
+            repository_directory("https://dev.azure.com/org/project/_git/app.git").as_deref(),
+            Some("app")
+        );
+        assert_eq!(
+            repository_directory("git@example.com:team/tool.git").as_deref(),
+            Some("tool")
+        );
+        assert_eq!(repository_directory("host:repo").as_deref(), Some("repo"));
+        assert_eq!(repository_directory("").as_deref(), None);
+    }
+
+    #[test]
+    fn the_repositorys_skills_are_the_directories_with_a_skill_file() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        assert!(repository_skills(directory.path()).is_empty());
+        let skills = directory.path().join(".claude").join("skills");
+        for (skill, has_file) in [("review", true), ("changelog", true), ("notes", false)] {
+            std::fs::create_dir_all(skills.join(skill)).expect("skill directory");
+            if has_file {
+                std::fs::write(skills.join(skill).join("SKILL.md"), "---\nname: x\n---\n").expect("skill");
+            }
+        }
+        assert_eq!(
+            repository_skills(directory.path()),
+            [".claude/skills/changelog", ".claude/skills/review"]
+        );
     }
 
     #[test]
@@ -463,15 +541,5 @@ mod tests {
         std::fs::write(&path, "mine").expect("existing manifest");
         write_new(&path, "template").expect_err("an existing file is kept");
         assert_eq!(std::fs::read_to_string(&path).expect("read"), "mine");
-    }
-
-    #[test]
-    fn a_new_manifest_goes_to_the_repository_root() {
-        let directory = tempfile::TempDir::new().expect("temporary directory");
-        let nested = directory.path().join("crates").join("tool");
-        std::fs::create_dir_all(&nested).expect("nested directory");
-        assert_eq!(manifest_location(&nested), nested.join("agent.yaml"));
-        std::fs::create_dir(directory.path().join(".git")).expect("repository");
-        assert_eq!(manifest_location(&nested), directory.path().join("agent.yaml"));
     }
 }

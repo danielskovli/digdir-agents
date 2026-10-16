@@ -1,4 +1,5 @@
-//! The `agent.yaml` and `.agentctl/Dockerfile` that `agentctl init` writes.
+//! The files `agentctl init` writes into `agents/<name>/`: the manifest, a variant working on
+//! the checkout, the image's Dockerfile, instructions, a home overlay and an `.env` sample.
 
 use agent::harness::AuthenticationStatus;
 
@@ -7,8 +8,10 @@ use super::{sizing::Size, toolchains::Toolchain};
 /// The published image every new agent starts from: the platform's Linux contract, both
 /// harnesses, Git and the GitHub CLI, and nothing specific to one project.
 pub(super) const BASE_IMAGE: &str = "ghcr.io/digdir/digdir-agents/agentctl-base-ubuntu:latest";
-/// Where a built image's Dockerfile and its build context live, relative to the manifest.
-pub(super) const IMAGE_DIRECTORY: &str = ".agentctl";
+/// The directory under the repository root that holds one directory per agent.
+pub(super) const AGENTS_DIRECTORY: &str = "agents";
+/// The variant of a cloning agent that works on the checkout instead.
+pub(super) const WORKTREE_VARIANT: &str = "agent.worktree.yaml";
 /// The scratch space a build gets in `/tmp`; the Sandbox default is a quarter of guest memory,
 /// capped at 512 MiB, too small for a large build. A tmpfs holds only what is written to it.
 const TMP_CAPACITY: &str = "2Gi";
@@ -27,105 +30,80 @@ pub(super) enum Github {
 /// Which image a new manifest uses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Image {
-    /// `.agentctl/Dockerfile`, built with Docker on this host from the base image.
+    /// The agent directory's Dockerfile, built with Docker on this host from the base image.
     Built,
     /// The published base image as it is.
     Base,
 }
 
-/// Where the agent's copy of the repository comes from.
+/// Where `agent.yaml`'s copy of the repository comes from.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Checkout {
-    /// A clone made at the agent's first boot, from `owner/name` on GitHub or a Git URL.
+    /// A clone made at the agent's first boot, from `owner/name` on GitHub or a Git URL;
+    /// [`WORKTREE_VARIANT`] mounts the checkout instead.
     Clone(String),
     /// This checkout, mounted read-write into the agent.
     Mount,
 }
 
-/// Everything the person chose for a new manifest.
+/// Everything the person chose for a new agent.
 #[derive(Clone, Debug)]
 pub(super) struct Choices {
     pub(super) name: String,
+    /// The directory under the agent's working directory that holds the repository.
+    pub(super) workspace: String,
     pub(super) github: Github,
     pub(super) image: Image,
     pub(super) checkout: Checkout,
     pub(super) size: Size,
+    /// The repository's own skill directories, relative to its root.
+    pub(super) skills: Vec<String>,
 }
 
-/// A manifest for `choices`: every harness, required when signed in and optional otherwise, so a
-/// later login adds it to the agent on its next pass.
+/// `agent.yaml` for `choices`, with every setting a person is likely to change later present,
+/// and those that do not apply yet commented out. Every harness is listed, so a later login adds
+/// it on the agent's next pass.
 pub(super) fn manifest(choices: &Choices, status: &AuthenticationStatus) -> String {
     let Choices {
         name,
+        workspace,
         github,
         image,
         checkout,
         size,
+        skills,
     } = choices;
-    let claude_default = status.claude_code || !status.codex;
-    let harness = |kind: &str, signed_in: bool, default: bool| {
-        let default = if default { "      default: true\n" } else { "" };
-        let optional = if signed_in {
-            String::new()
-        } else {
-            format!(
-                "      # Optional until `agentctl {} login` stores a login on this host.\n      optional: true\n",
-                if kind == "codex" { "codex" } else { "claude" }
-            )
-        };
-        format!("    - type: {kind}\n      auth: mediated\n{default}{optional}")
-    };
-    let harnesses =
-        harness("claudeCode", status.claude_code, claude_default) + &harness("codex", status.codex, !claude_default);
-    let accounts = match github {
-        Github::Owner(owner) => format!(
-            "  # Act as the GitHub token `agentctl github login` stored for {owner}.\n  accounts:\n    - type: github\n      owner: {owner}\n"
-        ),
-        Github::Only => {
-            "  # Act as the GitHub token `agentctl github login` stored.\n  accounts:\n    - type: github\n".to_owned()
-        }
-        Github::None => {
-            "  # Run `agentctl github login` and uncomment to act as a GitHub account.\n  # accounts:\n  #   - type: github\n"
-                .to_owned()
-        }
-    };
     let code = agent::sandbox::platform::WORKING_DIRECTORY;
+    let harnesses = harnesses(status);
+    let accounts = accounts(github);
     let image = match image {
         Image::Base => format!("    image:\n      type: reference\n      reference: {BASE_IMAGE}\n"),
-        Image::Built => format!(
-            "    # Built with Docker on this machine from {IMAGE_DIRECTORY}/Dockerfile.\n    image:\n      type: build\n      context: {IMAGE_DIRECTORY}\n      dockerfile: Dockerfile\n"
+        Image::Built => "    # Built with Docker on this machine from Dockerfile, which starts from the published\n    # agentctl-base-ubuntu image.\n    image:\n      type: build\n      context: .\n      dockerfile: Dockerfile\n".to_owned(),
+    };
+    let (about, checkout) = match checkout {
+        Checkout::Clone(repository) => (
+            format!(
+                "# The agent clones {repository} into {code}/{workspace} at first boot.\n# {WORKTREE_VARIANT} is the same agent working on this checkout instead.\n"
+            ),
+            String::new(),
+        ),
+        Checkout::Mount => (
+            format!(
+                "# The agent works on this checkout, mounted at {code}/{workspace}: what it changes there\n# changes on this machine.\n"
+            ),
+            bind_mount(workspace),
         ),
     };
-    let checkout = match checkout {
-        Checkout::Clone(repository) => format!(
-            "    # The image clones {repository} into {code} at first boot.
-    # To work on this checkout instead, uncomment the bind mount; mounts cannot change once the
-    # agent exists.
-    mounts:
-      # - type: bind
-      #   source: .
-      #   target: {code}/{name}
-      #   readOnly: false
-"
-        ),
-        Checkout::Mount => format!(
-            "    # This checkout, shared with the agent: what it changes here changes on this machine.
-    mounts:
-      - type: bind
-        source: .
-        target: {code}/{name}
-        readOnly: false
-"
-        ),
-    };
+    let skills = skills_section(skills);
     let Size {
         cpus,
         memory_gib,
         disk_gib,
     } = size;
     format!(
-        "# Created by `agentctl init`. Change it and run `agentctl apply` to update the agent.
-apiVersion: agents.platform/v1alpha1
+        "# Created by `agentctl init`. Change it and run `agentctl apply` to update the agent. The image,
+# resources, mounts and access cannot change once the agent exists: delete it and create it again.
+{about}apiVersion: agents.platform/v1alpha1
 kind: Agent
 metadata:
   name: {name}
@@ -142,16 +120,161 @@ spec:
         capacity: \"{disk_gib}Gi\"
         mode: layered
     initSystem: image
-{checkout}      # Build scratch space, held in memory only as it is used.
-      - type: tmpfs
-        target: /tmp
-        capacity: \"{TMP_CAPACITY}\"
-  harnesses:
-{harnesses}{accounts}  access:
+    mounts:
+{checkout}{tmp}  # Copied into the agent's home directory on every pass, such as dotfiles.
+  home:
+    source: home
+  # Installed for every harness as its own CLAUDE.md or AGENTS.md; the checkout's still apply.
+  instructions:
+    - source: instructions.md
+{skills}  harnesses:
+{harnesses}{accounts}  # Plain values from .env (see .env.sample), visible in the agent.
+  # environment:
+  #   - name: GIT_USER_NAME
+  #   - name: GIT_USER_EMAIL
+  # Secrets from .env: the agent sees a placeholder, which this machine swaps for the value only
+  # in requests to the allowed hosts.
+  # secrets:
+  #   - environment: AZURE_DEVOPS_PAT
+  #     allowedHosts:
+  #       - dev.azure.com
+  access:
     - type: ssh
-"
+  # All traffic goes through this machine's network mediator, and every host is allowed. To block
+  # some:
+  # network:
+  #   mode: mediated
+  #   allow: all
+  #   deny:
+  #     - metadata.google.internal
+",
+        tmp = tmp_mount("Build scratch space, held in memory only as it is used.")
     )
 }
+
+/// Every harness, required when signed in and optional otherwise, with Claude Code the default
+/// unless only Codex is signed in.
+fn harnesses(status: &AuthenticationStatus) -> String {
+    let claude_default = status.claude_code || !status.codex;
+    let harness = |kind: &str, signed_in: bool, default: bool| {
+        let default = if default { "      default: true\n" } else { "" };
+        let optional = if signed_in {
+            String::new()
+        } else {
+            format!(
+                "      # Optional until `agentctl {} login` stores a login on this host.\n      optional: true\n",
+                if kind == "codex" { "codex" } else { "claude" }
+            )
+        };
+        format!(
+            "    - type: {kind}\n      auth: mediated\n{default}{optional}      # The model and effort new sessions start with, unless one is chosen.\n      # defaults:\n      #   model: <model>\n      #   effort: <effort>\n"
+        )
+    };
+    harness("claudeCode", status.claude_code, claude_default) + &harness("codex", status.codex, !claude_default)
+}
+
+fn accounts(github: &Github) -> String {
+    match github {
+        Github::Owner(owner) => format!(
+            "  # Act as the GitHub token `agentctl github login` stored for {owner}.\n  accounts:\n    - type: github\n      owner: {owner}\n"
+        ),
+        Github::Only => {
+            "  # Act as the GitHub token `agentctl github login` stored.\n  accounts:\n    - type: github\n".to_owned()
+        }
+        Github::None => {
+            "  # Run `agentctl github login` and uncomment to act as a GitHub account.\n  # accounts:\n  #   - type: github\n"
+                .to_owned()
+        }
+    }
+}
+
+/// The repository's skills, listed from the agent directory, or a commented example.
+fn skills_section(skills: &[String]) -> String {
+    if skills.is_empty() {
+        return "  # Skills every harness gets, each a directory with a SKILL.md, for example:\n  # skills:\n  #   - source: ../../.claude/skills/<skill>\n".to_owned();
+    }
+    let listed: String = skills
+        .iter()
+        .flat_map(|skill| ["    - source: ../../", skill.as_str(), "\n"])
+        .collect();
+    format!(
+        "  # This repository's skills, for every harness and not only the one that finds them itself.\n  skills:\n{listed}"
+    )
+}
+
+/// The variant of a cloning `agent.yaml` that works on the checkout instead.
+pub(super) fn worktree_variant(choices: &Choices) -> String {
+    format!(
+        "# The agent in agent.yaml, working on this checkout instead of a clone: what it changes there
+# changes on this machine. agentctl refuses to mount a checkout with a .env file in it, so give
+# this variant its values from a file outside the checkout, chosen in the create form.
+apiVersion: agents.platform/v1alpha1
+kind: AgentVariant
+extends: agent.yaml
+metadata:
+  name: {name}-worktree
+spec:
+  sandbox:
+    mounts:
+{bind}{tmp}",
+        name = choices.name,
+        bind = bind_mount(&choices.workspace),
+        tmp = tmp_mount("Lists replace inherited ones, so this repeats agent.yaml's build scratch space.")
+    )
+}
+
+fn bind_mount(workspace: &str) -> String {
+    format!(
+        "      - type: bind\n        source: ../..\n        target: {}/{workspace}\n        readOnly: false\n",
+        agent::sandbox::platform::WORKING_DIRECTORY
+    )
+}
+
+fn tmp_mount(comment: &str) -> String {
+    format!("      # {comment}\n      - type: tmpfs\n        target: /tmp\n        capacity: \"{TMP_CAPACITY}\"\n")
+}
+
+/// The agent's own instructions, a starting point to replace.
+pub(super) fn instructions(choices: &Choices) -> String {
+    format!(
+        "# {name}
+
+You work on this repository in `{code}/{workspace}`. Its own CLAUDE.md or AGENTS.md describes the
+project; this file is for what an agent should know beyond it, such as how to run the tests here
+and what to check before opening a pull request.
+
+`AGENT_NAME`, `AGENT_SESSION_NAME` and `AGENT_HOST` say which agent and session you are and on
+which machine, so use them when you report where work happened.
+",
+        name = choices.name,
+        code = agent::sandbox::platform::WORKING_DIRECTORY,
+        workspace = choices.workspace
+    )
+}
+
+/// Example values for `.env`, which stays on this machine.
+pub(super) const ENV_SAMPLE: &str =
+    "# Copy to .env and fill in what agent.yaml declares under environment and secrets. .env stays
+# on this machine: plain values enter the agent as they are, and secrets only as placeholders.
+# GitHub needs no entry here: `agentctl github login` stores its token in agentd.
+#
+# A checkout that the agent mounts must not contain .env, so for agent.worktree.yaml keep the
+# file outside the checkout, for example ~/.agent/<name>.env, and choose it in the create form.
+
+# GIT_USER_NAME=Your Name
+# GIT_USER_EMAIL=you@example.com
+# AZURE_DEVOPS_PAT=
+";
+
+/// Keeps local values and personal variants out of Git.
+pub(super) const GITIGNORE: &str = ".env\nagent.mine.yaml\n";
+
+/// Keeps the agent's local files out of its image's build context, which is this directory.
+pub(super) const DOCKERIGNORE: &str =
+    "# The image's build context is this directory; only what the Dockerfile copies belongs in it.
+*
+!Dockerfile
+";
 
 /// A Dockerfile on the base image that clones `checkout` at boot and installs `toolchains`.
 pub(super) fn dockerfile(checkout: &Checkout, toolchains: &[Toolchain]) -> String {
@@ -350,6 +473,7 @@ mod tests {
     fn choices(github: Github, image: Image, checkout: Checkout) -> Choices {
         Choices {
             name: "worker".into(),
+            workspace: "app".into(),
             github,
             image,
             checkout,
@@ -358,15 +482,52 @@ mod tests {
                 memory_gib: 4,
                 disk_gib: 16,
             },
+            skills: Vec::new(),
         }
     }
 
     fn built() -> Choices {
-        choices(Github::None, Image::Built, Checkout::Clone("digdir/worker".into()))
+        choices(Github::None, Image::Built, Checkout::Clone("digdir/app".into()))
     }
 
     fn decoded(text: &str) -> agent::Agent {
         agent::manifest::decode(text.as_bytes()).expect("the template is a valid manifest")
+    }
+
+    fn checkout_mount(mount: &agent::MountSpec) -> bool {
+        let target = format!("{}/app", agent::sandbox::platform::WORKING_DIRECTORY);
+        matches!(mount, agent::MountSpec::Bind { source, target: bound, read_only: false }
+            if source == Path::new("../..") && bound.as_str() == target)
+    }
+
+    fn tmp_mount(mount: &agent::MountSpec) -> bool {
+        matches!(mount, agent::MountSpec::Tmpfs { target, .. } if target.as_str() == "/tmp")
+    }
+
+    /// Uncomments each commented-out example block that starts with one of `keys`, as a person
+    /// enabling it would, and fills in its placeholders.
+    fn uncommented(text: &str, keys: &[&str]) -> String {
+        let mut inside: Option<usize> = None;
+        let mut lines = Vec::new();
+        for line in text.lines() {
+            let indent = line.len() - line.trim_start().len();
+            let comment = line.trim_start().strip_prefix("# ");
+            let starts = comment.is_some_and(|rest| keys.iter().any(|key| rest == format!("{key}:")));
+            if starts {
+                inside = Some(indent);
+            } else if inside.is_some_and(|block| indent != block || comment.is_none_or(|rest| !rest.starts_with(' '))) {
+                inside = None;
+            }
+            match (inside, comment) {
+                (Some(_), Some(rest)) => lines.push(format!("{}{rest}", &line[..indent])),
+                _ => lines.push(line.to_owned()),
+            }
+        }
+        lines
+            .join("\n")
+            .replace("<model>", "sonnet")
+            .replace("<effort>", "high")
+            .replace("<skill>", "review")
     }
 
     #[test]
@@ -424,55 +585,117 @@ mod tests {
     }
 
     #[test]
-    fn the_size_and_a_tmp_scratch_space_are_in_the_manifest() {
+    fn the_size_home_instructions_and_scratch_space_are_in_the_manifest() {
         let agent = decoded(&manifest(&built(), &status(true, false)));
         let resources = serde_yaml_ng::to_value(agent.spec.sandbox.resources).expect("resources");
         assert_eq!(resources["cpu"], "2", "{resources:?}");
         assert_eq!(resources["memory"], "4Gi", "{resources:?}");
         assert_eq!(resources["rootFilesystem"]["capacity"], "16Gi", "{resources:?}");
-        assert!(matches!(
-            agent.spec.sandbox.mounts.as_slice(),
-            [agent::MountSpec::Tmpfs { target, .. }] if target.as_str() == "/tmp"
-        ));
-    }
-
-    #[test]
-    fn a_mounted_checkout_is_bound_and_a_cloned_one_offers_the_mount_commented() {
-        let target = format!("{}/worker", agent::sandbox::platform::WORKING_DIRECTORY);
-        let is_checkout = |mount: &agent::MountSpec| {
-            matches!(mount, agent::MountSpec::Bind { source, target: bound, read_only: false }
-                if source == Path::new(".") && bound.as_str() == target)
-        };
-        let mounted = decoded(&manifest(
-            &choices(Github::None, Image::Base, Checkout::Mount),
-            &status(true, false),
-        ));
-        assert!(matches!(mounted.spec.sandbox.mounts.as_slice(), [checkout, _tmp] if is_checkout(checkout)));
-
-        let cloned = manifest(&built(), &status(true, false));
-        assert!(cloned.contains("clones digdir/worker"), "{cloned}");
-        let uncommented = cloned
-            .replace("      # - type: bind", "      - type: bind")
-            .replace("      #   ", "        ");
-        assert!(
-            matches!(decoded(&uncommented).spec.sandbox.mounts.as_slice(), [checkout, _tmp] if is_checkout(checkout))
+        assert!(matches!(agent.spec.sandbox.mounts.as_slice(), [tmp] if tmp_mount(tmp)));
+        assert_eq!(agent.spec.home.map(|home| home.source), Some("home".into()));
+        assert_eq!(
+            agent
+                .spec
+                .instructions
+                .iter()
+                .map(|instructions| instructions.source.clone())
+                .collect::<Vec<_>>(),
+            [std::path::PathBuf::from("instructions.md")]
         );
     }
 
     #[test]
-    fn the_image_is_the_base_or_built_from_the_repositorys_dockerfile() {
-        let base = decoded(&manifest(
+    fn every_commented_example_is_valid_once_uncommented() {
+        let text = manifest(&built(), &status(true, false));
+        let keys = ["accounts", "defaults", "environment", "secrets", "network", "skills"];
+        let enabled = uncommented(&text, &keys);
+        let agent = agent::manifest::decode(enabled.as_bytes()).unwrap_or_else(|error| panic!("{error}\n{enabled}"));
+        assert!(agent.spec.github_account(), "{enabled}");
+        assert_eq!(agent.spec.environment.len(), 2, "{enabled}");
+        assert_eq!(agent.spec.secrets.len(), 1, "{enabled}");
+        assert_eq!(agent.spec.skills.len(), 1, "{enabled}");
+        assert!(
+            agent.spec.harnesses.iter().all(|harness| !harness.defaults.is_empty()),
+            "{enabled}"
+        );
+        let network = serde_yaml_ng::to_value(&agent.spec.network).expect("network");
+        assert_eq!(network["deny"][0], "metadata.google.internal", "{enabled}");
+    }
+
+    #[test]
+    fn the_repositorys_skills_are_listed_from_the_agent_directory() {
+        let mut with_skills = built();
+        with_skills.skills = vec![".claude/skills/changelog".into(), ".claude/skills/review".into()];
+        let agent = decoded(&manifest(&with_skills, &status(true, false)));
+        assert_eq!(
+            agent
+                .spec
+                .skills
+                .iter()
+                .map(|skill| skill.source.clone())
+                .collect::<Vec<_>>(),
+            [
+                std::path::PathBuf::from("../../.claude/skills/changelog"),
+                std::path::PathBuf::from("../../.claude/skills/review")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cloning_agent_has_a_worktree_variant_that_mounts_the_checkout() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let manifest_path = directory.path().join("agent.yaml");
+        let cloning = built();
+        std::fs::write(&manifest_path, manifest(&cloning, &status(true, false))).expect("manifest");
+        std::fs::write(directory.path().join(WORKTREE_VARIANT), worktree_variant(&cloning)).expect("variant");
+
+        let base = agent::manifest::resolve(&manifest_path).expect("agent.yaml");
+        assert!(matches!(base.agent.spec.sandbox.mounts.as_slice(), [tmp] if tmp_mount(tmp)));
+        let variant = agent::manifest::resolve(&directory.path().join(WORKTREE_VARIANT)).expect("the variant");
+        assert_eq!(variant.agent.metadata.name, "worker-worktree");
+        assert!(
+            matches!(variant.agent.spec.sandbox.mounts.as_slice(), [checkout, tmp] if checkout_mount(checkout) && tmp_mount(tmp)),
+            "{:?}",
+            variant.agent.spec.sandbox.mounts
+        );
+        assert_eq!(variant.agent.spec.sandbox.resources, base.agent.spec.sandbox.resources);
+    }
+
+    #[test]
+    fn a_mounted_checkout_is_bound_in_the_manifest_itself() {
+        let mounted = decoded(&manifest(
             &choices(Github::None, Image::Base, Checkout::Mount),
             &status(true, false),
         ));
-        let image = serde_yaml_ng::to_value(&base.spec.sandbox.image).expect("image");
+        assert!(
+            matches!(mounted.spec.sandbox.mounts.as_slice(), [checkout, tmp] if checkout_mount(checkout) && tmp_mount(tmp))
+        );
+        let image = serde_yaml_ng::to_value(&mounted.spec.sandbox.image).expect("image");
         assert_eq!(image["reference"], BASE_IMAGE, "{image:?}");
+    }
 
+    #[test]
+    fn a_built_image_comes_from_the_agent_directory() {
         let built = decoded(&manifest(&built(), &status(true, false)));
         let image = serde_yaml_ng::to_value(&built.spec.sandbox.image).expect("image");
         assert_eq!(image["type"], "build", "{image:?}");
-        assert_eq!(image["context"], IMAGE_DIRECTORY, "{image:?}");
+        assert_eq!(image["context"], ".", "{image:?}");
         assert_eq!(image["dockerfile"], "Dockerfile", "{image:?}");
+        assert!(
+            DOCKERIGNORE.lines().any(|line| line == "*"),
+            "nothing else enters the build context"
+        );
+        assert!(GITIGNORE.lines().any(|line| line == ".env"));
+    }
+
+    #[test]
+    fn the_instructions_name_where_the_repository_is() {
+        let text = instructions(&built());
+        assert!(text.starts_with("# worker\n"), "{text}");
+        assert!(
+            text.contains(&format!("`{}/app`", agent::sandbox::platform::WORKING_DIRECTORY)),
+            "{text}"
+        );
     }
 
     #[test]

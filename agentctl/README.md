@@ -32,21 +32,29 @@ irm https://raw.githubusercontent.com/digdir/digdir-agents/main/agentctl/install
 Update an installation with `agentctl self update`.
 
 Then, in any repository, run `agentctl init`. It offers the Claude Code or Codex login when neither is stored, and the
-GitHub account login when none is, writes an `agent.yaml` at the repository root when the checkout has no manifest,
-and creates the Agent through the same form as `agentctl tui`. Once the Agent is Ready it offers to open a Session.
-Before creating the agent it offers to open the written manifest in `$VISUAL` or `$EDITOR`, since the image,
+GitHub account login when none is, writes an agent directory when the checkout has no manifest, and creates the Agent.
+Once the Agent is Ready it offers to open a Session. Before creating the agent it offers to open the written files in
+`$VISUAL` or `$EDITOR`, since the image,
 resources, mounts and access cannot change once the agent exists. `agentctl status` shows agentd, the stored logins
 and the current directory's agent at a glance, and `agentctl claude status` and `agentctl codex status` exit with 1
 when that login is missing.
 
-The written manifest starts from the published [`agentctl-base-ubuntu`](../agents/base-ubuntu) image. When Docker
-runs on your machine, `init` writes `.agentctl/Dockerfile` on top of it, with a block for each toolchain the repository
-declares at the version it asks for: Node.js (`.nvmrc`, `engines`, Corepack for `packageManager`), .NET (`global.json`),
-Go (`go.mod`), Rust (`rust-toolchain.toml`), Python and Java. That image clones the repository into the agent at first
-boot, or the agent works on this checkout through a read-write mount if you choose so; without Docker it always works
-on the checkout. The proposed size fits this machine: up to 4 CPUs, 8 GiB of memory and a disk of at most half the free
-space on the volume holding `~/.agent`, since an agent's disk takes host space as the agent writes, up to its size.
-Edit the manifest and Dockerfile like any other. `agentctl` on its own asks
+The agent directory is `agents/<repository>/` at the repository root, laid out like the Agents in this repository and
+in altinn-studio:
+
+| File | What it is |
+| --- | --- |
+| `agent.yaml` | The manifest, with every setting a person is likely to change later; those that do not apply yet are commented out |
+| `agent.worktree.yaml` | A variant of a cloning `agent.yaml` that works on this checkout through a read-write mount instead |
+| `Dockerfile` | Starts from the published [`agentctl-base-ubuntu`](../agents/base-ubuntu) image and installs each toolchain the repository declares, at the version it asks for: Node.js (`.nvmrc`, `engines`, Corepack for `packageManager`), .NET (`global.json`), Go (`go.mod`), Rust (`rust-toolchain.toml`), Python and Java. Docker on your machine builds it |
+| `instructions.md` | The agent's own instructions, installed for every harness beside the checkout's `CLAUDE.md` or `AGENTS.md` |
+| `home/` | Files copied into `/home/agent`, such as dotfiles |
+| `.env.sample` | Example plain values and secrets for `.env`, which `.gitignore` keeps out of Git with `agent.mine.yaml` |
+
+The repository's own skills under `.claude/skills` are listed in the manifest, so every harness gets them. Without
+Docker the agent runs the base image as it is and always works on the checkout. The proposed size fits this machine:
+up to 4 CPUs, 8 GiB of memory and a disk of at most half the free space on the volume holding `~/.agent`, since an
+agent's disk takes host space as the agent writes, up to its size. Edit the files like any others. `agentctl` on its own asks
 whether to open the current directory's Agent in `agentctl tui`, or to set one up when there is none, and prints the
 help when you decline. `attach`, `exec` and `ssh` likewise offer `init` when they would use the current directory's
 Agent and find none. Both ask only when a person is at the terminal; scripts get the usual error.
