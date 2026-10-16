@@ -75,6 +75,8 @@ fn sign_in_with(program: &std::path::Path) -> Result<Option<Zeroizing<String>>, 
         "--hostname",
         "github.com",
         "--web",
+        // The person pastes the one-time code into the browser, so gh copies it for them.
+        "--clipboard",
         // With `https`, gh offers to configure Git's credential helper, which would point the
         // host's Git at this throwaway login. The protocol choice itself is discarded with it.
         "--git-protocol",
@@ -241,6 +243,7 @@ mod tests {
         assert!(lines[0].starts_with("auth login "), "{log}");
         for flag in [
             "--web",
+            "--clipboard",
             "--git-protocol ssh",
             "--skip-ssh-key",
             "--insecure-storage",
