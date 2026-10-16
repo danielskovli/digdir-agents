@@ -96,7 +96,9 @@ The Sandbox crates do not depend on Agent automation.
 
 `agentd` owns the durable desired state and all lifecycle effects. `agentctl` starts the adjacent daemon on demand and
 communicates through the versioned local control API. Its resource-oriented commands follow `verb resource [name]`;
-Session scope is explicit through `--agent` or inferred from the closest unique persisted Agent source directory.
+Session scope is explicit through `--agent` or inferred from the closest unique persisted Agent source directory: the
+manifest's directory, a bind-mounted host directory, or, least specifically, the Git checkout the manifest is in, so an
+Agent defined in `agents/<name>/` is found from anywhere in its repository.
 Transient `exec` commands similarly converge the Agent first, then target its exact materialized Sandbox without
 creating durable Session state or taking Sandbox lifecycle ownership away from `agentd`.
 
