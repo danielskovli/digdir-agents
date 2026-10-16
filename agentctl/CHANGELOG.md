@@ -14,6 +14,7 @@ Agents. The Rust workspace version is a build detail and is not tracked here.
 
 ### Added
 
+- `agentctl instructions edit` sets instructions that every agent on this host receives ahead of its own, such as how you track work. ([agentctl](https://github.com/digdir/digdir-agents/tree/main/agentctl#images-home-and-harnesses))
 - `agentctl status` shows agentd, your Claude Code, Codex and GitHub logins and the current directory's agent at a glance; `agentctl claude status` and `agentctl codex status` check one login. ([install](https://github.com/digdir/digdir-agents/tree/main/agentctl#install))
 - `agentctl init` sets up an Agent for the repository you are in: it signs you in where needed, writes an `agent.yaml` when the repository has none, with the published image or a Dockerfile of your own to build on it, creates the agent and offers to open a session. ([install](https://github.com/digdir/digdir-agents/tree/main/agentctl#install))
 - `agentctl github login` walks you through creating a fine-grained GitHub token for Agents, one per organization, separate from your own `gh` login, checks what it can do before storing it, and `agentctl github list`, `logout` and `reset` show and remove them. Agents whose manifest lists `accounts: [{type: github, owner: …}]` use it for `gh`, `git push` and the GitHub API and commit as its account, with no `.env` file. ([GitHub accounts](https://github.com/digdir/digdir-agents/tree/main/agentctl#github-accounts))

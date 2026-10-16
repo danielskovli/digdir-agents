@@ -34,7 +34,8 @@ Update an installation with `agentctl self update`.
 Then, in any repository, run `agentctl init`. It offers the Claude Code or Codex login when neither is stored, and the
 GitHub account login when none is, writes an `agent.yaml` at the repository root when the checkout has no manifest,
 and creates the Agent through the same form as `agentctl tui`. Once the Agent is Ready it offers to open a Session.
-Before creating the agent it offers to open the written manifest in `$VISUAL` or `$EDITOR`, since the image,
+The manifest's `home` overlay, `.agentctl/home`, carries Claude Code's state with its first-run questions answered,
+as the self-development agents' does, so sessions do not stop at onboarding. Before creating the agent it offers to open the written manifest in `$VISUAL` or `$EDITOR`, since the image,
 resources, mounts and access cannot change once the agent exists. `agentctl status` shows agentd, the stored logins
 and the current directory's agent at a glance, and `agentctl claude status` and `agentctl codex status` exit with 1
 when that login is missing. The written manifest uses the published self-development image, or, if you choose a custom image, a Dockerfile it
@@ -172,7 +173,9 @@ installation cannot usefully be optional, since it is what a Session selecting n
 Each installation may declare `defaults` with a `model` and an `effort` level for its new Sessions, in the harness's
 own vocabulary. The published manifests select `model: fable` for Claude Code because a mediated token cannot list
 Fable in the `/model` picker.
-`spec.instructions` names one harness-neutral Agent instruction file. Every declared Harness Adapter installs that source
+`agentctl instructions edit` opens the host-wide instructions file, `~/.agent/instructions.md`, which every agent on
+the host receives ahead of its own instructions, within one reconciliation pass and without being recreated; emptying
+it gives agents none. `spec.instructions` names one harness-neutral Agent instruction file. Every declared Harness Adapter installs that source
 at its global instruction location: `~/.claude/CLAUDE.md` for Claude Code and `~/.codex/AGENTS.md` for Codex.
 Repository-local instruction files continue to be discovered by the harness itself.
 

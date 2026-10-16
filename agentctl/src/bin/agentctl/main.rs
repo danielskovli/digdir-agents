@@ -317,6 +317,11 @@ enum Command {
     Init,
     /// Show agentd, the stored logins and the current directory's agent at a glance.
     Status,
+    /// Manage the instructions every agent on this host receives, ahead of its own.
+    Instructions {
+        #[command(subcommand)]
+        command: InstructionsCommand,
+    },
     /// Open the interactive terminal UI.
     Tui,
     /// Wait for a resource condition.
@@ -472,6 +477,15 @@ enum CodexCommand {
     },
     /// Say whether agents can use Codex; exits with 1 when no login is stored.
     Status,
+}
+
+#[derive(Subcommand)]
+enum InstructionsCommand {
+    /// Open the host-wide instructions in your editor, creating the file if needed.
+    ///
+    /// Every agent's harness receives them ahead of the agent's own instructions, within one
+    /// reconciliation pass and without recreating the agent. Empty the file to give agents none.
+    Edit,
 }
 
 #[derive(Subcommand)]
@@ -646,7 +660,10 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
         Command::Codex {
             command: CodexCommand::Status,
         } => return harness_status(client, agent::Harness::Codex).await,
-        Command::Status => status(client).await?,
+        Command::Status => status(home, client).await?,
+        Command::Instructions {
+            command: InstructionsCommand::Edit,
+        } => edit_instructions(home)?,
         Command::Github {
             command:
                 GithubCommand::Login {
@@ -1852,7 +1869,7 @@ async fn harness_status(client: &Client, harness: agent::Harness) -> CommandResu
 }
 
 /// Shows agentd, the stored logins and the current directory's agent at a glance.
-async fn status(client: &Client) -> CommandResult<()> {
+async fn status(home: &ControlPlaneHome, client: &Client) -> CommandResult<()> {
     let daemon = client.health().await?;
     let auth = client.auth_status().await?;
     let mut rows = vec![(
@@ -1894,6 +1911,16 @@ async fn status(client: &Client) -> CommandResult<()> {
     for (index, line) in github.into_iter().enumerate() {
         rows.push((if index == 0 { "GitHub" } else { "" }, line));
     }
+    let instructions = home.instructions_path();
+    rows.push((
+        "Instructions",
+        match std::fs::read_to_string(&instructions) {
+            Ok(text) if !text.trim().is_empty() => {
+                format!("{} lines in {}", text.lines().count(), instructions.display())
+            }
+            _ => "none for every agent: agentctl instructions edit".to_owned(),
+        },
+    ));
     let directory = std::env::current_dir().map_err(Error::from)?;
     let here = match client.resolve_agent_variant(directory, None).await {
         Ok(agent) => {
@@ -1916,6 +1943,20 @@ async fn status(client: &Client) -> CommandResult<()> {
     for (label, value) in rows {
         println!("{label:<15} {value}");
     }
+    Ok(())
+}
+
+/// Opens the host-wide instructions in an editor, creating the file first when it is missing.
+fn edit_instructions(home: &ControlPlaneHome) -> CommandResult<()> {
+    let path = home.instructions_path();
+    if !path.exists() {
+        std::fs::write(&path, "").map_err(Error::from)?;
+    }
+    prompt::edit_files(&[&path])?;
+    println!(
+        "Agents receive {} ahead of their own instructions on their next pass.",
+        path.display()
+    );
     Ok(())
 }
 
@@ -2316,6 +2357,14 @@ mod tests {
                 .expect("status")
                 .command,
             Some(Command::Status)
+        ));
+        assert!(matches!(
+            Arguments::try_parse_from(["agentctl", "instructions", "edit"])
+                .expect("instructions edit")
+                .command,
+            Some(Command::Instructions {
+                command: InstructionsCommand::Edit
+            })
         ));
         assert!(matches!(
             Arguments::try_parse_from(["agentctl", "claude", "status"])
