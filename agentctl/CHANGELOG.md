@@ -12,6 +12,10 @@ Agents. The Rust workspace version is a build detail and is not tracked here.
 
 ## [Unreleased]
 
+### Changed
+
+- Sessions are tested with Claude Code 2.1.302 and Codex CLI 0.163.0, so Agents with their own images can install these versions. ([#181](https://github.com/digdir/digdir-agents/pull/181))
+
 ### Security
 
 - `agentctl` and `agentd` use rustls 0.23.46. They were not affected by the advisories it fixes, so a scanner that flags rustls 0.23.45 in 0.1.0-preview.11 needs no urgent upgrade ([RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346), [-0347](https://rustsec.org/advisories/RUSTSEC-2026-0347), [-0348](https://rustsec.org/advisories/RUSTSEC-2026-0348), [-0349](https://rustsec.org/advisories/RUSTSEC-2026-0349), [#177](https://github.com/digdir/digdir-agents/pull/177)).
