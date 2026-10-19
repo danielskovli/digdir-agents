@@ -1,0 +1,295 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 870" width="1600" height="870">
+<style>
+/* The same stylesheet is in every diagram; change it in all of them. Colours follow the Digdir palette used by the slides.
+   Arial and its metric twins (Helvetica, Liberation Sans) render text at the same width everywhere. */
+svg { font-family: Arial, Helvetica, "Liberation Sans", sans-serif; color: #1e2b3c; }
+.canvas { fill: #ffffff; }
+.mono, .code, .code-sm { font-family: Menlo, Consolas, "Liberation Mono", monospace; }
+
+/* Text */
+.title { font-size: 26px; font-weight: 700; fill: #1e2b3c; letter-spacing: -0.02em; }
+.subtitle { font-size: 14px; fill: #5b6b7f; }
+.kicker { font-size: 11.5px; font-weight: 650; letter-spacing: 0.14em; fill: #0062ba; }
+.zone-label { font-size: 11.5px; font-weight: 650; letter-spacing: 0.12em; }
+.h { font-size: 15px; font-weight: 650; fill: #1e2b3c; }
+.h-sm { font-size: 13px; font-weight: 650; fill: #1e2b3c; }
+.s { font-size: 12.5px; fill: #5b6b7f; }
+.s-sm { font-size: 11.5px; fill: #5b6b7f; }
+.code { font-size: 11.5px; font-weight: 500; fill: #0b4f8f; }
+.code-sm { font-size: 10.5px; font-weight: 500; fill: #0b4f8f; }
+.label { font-size: 11.5px; font-weight: 550; fill: #3b4b5f; }
+.label-bg { fill: #ffffff; }
+.step { font-size: 11px; font-weight: 700; fill: #ffffff; }
+.legend { font-size: 12px; fill: #3b4b5f; }
+
+/* Zones: trust domains and process boundaries */
+.zone { stroke-width: 1.5; }
+.zone-host { fill: #f1f7fd; stroke: #0062ba; }
+.zone-host-label { fill: #0062ba; }
+.zone-sandbox { fill: #fdf7e6; stroke: #c48a0a; stroke-dasharray: 7 5; }
+.zone-sandbox-label { fill: #9a6a00; }
+.zone-ext { fill: #f4f6f9; stroke: #93a4b8; }
+.zone-ext-label { fill: #5b6b7f; }
+.zone-proc { fill: #ffffff; fill-opacity: 0.6; stroke: #7d9bbd; stroke-dasharray: 3 4; }
+.zone-proc-label { fill: #4a6585; }
+
+/* Boxes */
+.box { fill: #ffffff; stroke: #c9d3df; stroke-width: 1; filter: url(#shadow); }
+.box-host { fill: #ffffff; stroke: #8db7e3; }
+.box-sandbox { fill: #ffffff; stroke: #e3c06a; }
+.box-session { fill: #edf8f2; stroke: #3fb27f; }
+.box-secret { fill: #fdeff0; stroke: #f45f63; }
+.box-ext { fill: #ffffff; stroke: #b8c4d2; }
+.box-accent { fill: #0062ba; stroke: #0062ba; }
+.box-accent-text { fill: #ffffff; }
+.box-accent-sub { fill: #cfe3f7; }
+.store { fill: #ffffff; stroke: #8db7e3; stroke-width: 1; }
+
+/* Small rounded tags */
+.tag { stroke-width: 1; }
+.tag-blue { fill: #e3effb; stroke: #a8c9ec; }
+.tag-amber { fill: #fbefcf; stroke: #ebcb7a; }
+.tag-coral { fill: #fde4e5; stroke: #f5a5a7; }
+.tag-green { fill: #dcf3e7; stroke: #96d6b6; }
+.tag-gray { fill: #eef1f5; stroke: #cdd6e0; }
+.tag-text { font-size: 10.5px; font-weight: 600; letter-spacing: 0.04em; }
+.tag-text-blue { fill: #0b4f8f; }
+.tag-text-amber { fill: #8a5e00; }
+.tag-text-coral { fill: #b3262b; }
+.tag-text-green { fill: #1f7a52; }
+.tag-text-gray { fill: #4a5b70; }
+
+/* Edges */
+.edge { fill: none; stroke: #4a5b70; stroke-width: 1.6; }
+.edge-blue { fill: none; stroke: #0062ba; stroke-width: 1.8; }
+.edge-coral { fill: none; stroke: #e0474c; stroke-width: 1.8; }
+.edge-green { fill: none; stroke: #2e9467; stroke-width: 1.8; }
+.edge-amber { fill: none; stroke: #c48a0a; stroke-width: 1.8; }
+.edge-muted { fill: none; stroke: #93a4b8; stroke-width: 1.4; stroke-dasharray: 5 4; }
+.dashed { stroke-dasharray: 6 4; }
+.blocked { fill: none; stroke: #e0474c; stroke-width: 1.8; stroke-dasharray: 2 4; }
+
+/* Step badges for sequences */
+.badge { fill: #0062ba; }
+.badge-coral { fill: #e0474c; }
+.lifeline { stroke: #b8c4d2; stroke-width: 1.2; stroke-dasharray: 4 5; }
+.activation { fill: #e3effb; stroke: #8db7e3; }
+.divider { stroke: #dfe5ec; stroke-width: 1; }
+</style>
+<defs>
+  <filter id="shadow" x="-10%" y="-10%" width="120%" height="140%">
+    <feDropShadow dx="0" dy="1.5" stdDeviation="2" flood-color="#1e2b3c" flood-opacity="0.10"/>
+  </filter>
+  <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0.8 L9.2,5 L0,9.2 Z" fill="#4a5b70"/>
+  </marker>
+  <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0.8 L9.2,5 L0,9.2 Z" fill="#0062ba"/>
+  </marker>
+  <marker id="arrow-coral" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0.8 L9.2,5 L0,9.2 Z" fill="#e0474c"/>
+  </marker>
+  <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0.8 L9.2,5 L0,9.2 Z" fill="#2e9467"/>
+  </marker>
+  <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0.8 L9.2,5 L0,9.2 Z" fill="#c48a0a"/>
+  </marker>
+  <marker id="arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0.8 L9.2,5 L0,9.2 Z" fill="#93a4b8"/>
+  </marker>
+  <marker id="stop" viewBox="0 0 12 12" refX="6" refY="6" markerWidth="11" markerHeight="11">
+    <path d="M2,2 L10,10 M10,2 L2,10" stroke="#e0474c" stroke-width="2.4" stroke-linecap="round"/>
+  </marker>
+</defs>
+<rect class="canvas" width="1600" height="870"/>
+
+<text class="kicker" x="40" y="48">AGENT PLATFORM · NETWORK AND SECRETS</text>
+<text class="title" x="40" y="82">Secrets never enter the Sandbox</text>
+<text class="subtitle" x="40" y="106">Every flow ends in the msb network engine on the host. It asks agentd before it acts, and it puts a real secret into a request only on its way to an allowed host.</text>
+
+<!-- Sandbox -->
+<rect class="zone zone-sandbox" x="40" y="130" width="360" height="680" rx="16"/>
+<text class="zone-label zone-sandbox-label" x="62" y="155">SANDBOX · UNTRUSTED</text>
+
+<rect class="box box-sandbox" x="62" y="175" width="316" height="128" rx="10"/>
+<text class="h" x="80" y="202">gh · git · curl · npm</text>
+<text class="s" x="80" y="222">any process in the guest</text>
+<rect class="tag tag-gray" x="78" y="236" width="284" height="52" rx="7"/>
+<text class="code-sm" x="90" y="257" style="fill:#4a5b70">GITHUB_TOKEN=</text>
+<text class="code-sm" x="90" y="276">github_pat_AGENT_MEDIATED_…</text>
+
+<rect class="box box-sandbox" x="62" y="328" width="316" height="100" rx="10"/>
+<text class="h" x="80" y="355">TLS client</text>
+<text class="s" x="80" y="375">trusts the Sandbox CA, which guest</text>
+<text class="s" x="80" y="392">agentd adds to the system store and</text>
+<text class="code-sm" x="80" y="411">SSL_CERT_FILE · NODE_EXTRA_CA_CERTS</text>
+
+<rect class="box box-sandbox" x="62" y="453" width="316" height="70" rx="10"/>
+<text class="h" x="80" y="480">Guest kernel TCP/IP</text>
+<text class="s" x="80" y="500">its own stack and its own address</text>
+
+<rect class="box box-sandbox" x="62" y="548" width="316" height="70" rx="10"/>
+<text class="h" x="80" y="575">virtio-net</text>
+<text class="s" x="80" y="595">the only network device</text>
+
+<path class="edge" d="M220,303 V324" marker-end="url(#arrow)"/>
+<path class="edge" d="M220,428 V449" marker-end="url(#arrow)"/>
+<path class="edge" d="M220,523 V544" marker-end="url(#arrow)"/>
+
+<rect class="box" x="62" y="648" width="316" height="140" rx="10" style="fill:#fffdf6;stroke:#e3c06a"/>
+<text class="h-sm" x="80" y="673">Never in the Sandbox</text>
+<g class="s">
+  <text x="80" y="697">· real secret values</text>
+  <text x="80" y="717">· the CA's private key</text>
+  <text x="80" y="737">· a route to the host network, except</text>
+  <text x="92" y="757">the Platform API through</text>
+  <text class="code-sm" x="92" y="776">host.microsandbox.internal</text>
+</g>
+
+<!-- msb network engine -->
+<rect class="zone zone-host" x="440" y="130" width="440" height="680" rx="16"/>
+<text class="zone-label zone-host-label" x="462" y="155">MSB NETWORK ENGINE · HOST</text>
+
+<g>
+  <rect class="box box-host" x="465" y="175" width="390" height="82" rx="10"/>
+  <text class="h" x="483" y="202">Userspace TCP/IP</text>
+  <text class="s" x="483" y="222">smoltcp; every flow ends here</text>
+  <text class="s" x="483" y="239">no TAP device, bridge or NAT on the host</text>
+  <text class="code-sm" x="839" y="202" text-anchor="end">network.connect</text>
+
+  <rect class="box box-host" x="465" y="277" width="390" height="82" rx="10"/>
+  <text class="h" x="483" y="304">DNS forwarder</text>
+  <text class="s" x="483" y="324">every query authorized, then sent</text>
+  <text class="s" x="483" y="341">to the host's own resolver</text>
+  <text class="code-sm" x="839" y="304" text-anchor="end">dns.query</text>
+
+  <rect class="box box-host" x="465" y="379" width="390" height="82" rx="10"/>
+  <text class="h" x="483" y="406">TLS termination</text>
+  <text class="s" x="483" y="426">a certificate for each host, minted</text>
+  <text class="s" x="483" y="443">on demand by the Sandbox CA</text>
+
+  <rect class="box box-host" x="465" y="481" width="390" height="82" rx="10"/>
+  <text class="h" x="483" y="508">HTTP request</text>
+  <text class="s" x="483" y="528">method, host and path are visible</text>
+  <text class="s" x="483" y="545">to the policy</text>
+  <text class="code-sm" x="839" y="508" text-anchor="end">http.request</text>
+
+  <rect class="box box-secret" x="465" y="583" width="390" height="82" rx="10"/>
+  <text class="h" x="483" y="610">Secret substitution</text>
+  <text class="s" x="483" y="630">placeholder found in a header, the</text>
+  <text class="s" x="483" y="647">query string or basic auth</text>
+  <text class="code-sm" x="839" y="610" text-anchor="end" style="fill:#b3262b">secret.use</text>
+
+  <rect class="box box-session" x="465" y="685" width="390" height="82" rx="10"/>
+  <text class="h" x="483" y="712">New TLS connection</text>
+  <text class="s" x="483" y="732">to the real server, verified as usual,</text>
+  <text class="s" x="483" y="749">carrying the real value</text>
+</g>
+<path class="edge" d="M660,257 V273" marker-end="url(#arrow)"/>
+<path class="edge" d="M660,359 V375" marker-end="url(#arrow)"/>
+<path class="edge" d="M660,461 V477" marker-end="url(#arrow)"/>
+<path class="edge" d="M660,563 V579" marker-end="url(#arrow)"/>
+<path class="edge" d="M660,665 V681" marker-end="url(#arrow)"/>
+
+<path class="edge-blue" d="M378,583 H420 V216 H461" marker-end="url(#arrow-blue)"/>
+
+<!-- agentd -->
+<rect class="zone zone-host" x="940" y="130" width="300" height="515" rx="16"/>
+<text class="zone-label zone-host-label" x="962" y="155">AGENTD · HOST</text>
+
+<rect class="box box-host" x="962" y="175" width="256" height="100" rx="10"/>
+<text class="h" x="980" y="202">Network Backend</text>
+<text class="s" x="980" y="222">host side of the control</text>
+<text class="s" x="980" y="239">channel; may revoke live flows</text>
+<text class="code-sm" x="980" y="260">MicrosandboxNetworkBackend</text>
+
+<rect class="box box-secret" x="962" y="305" width="256" height="150" rx="10"/>
+<text class="h" x="980" y="332">Policy engine</text>
+<text class="code-sm" x="980" y="351" style="fill:#b3262b">AgentPolicyEngine</text>
+<g class="s">
+  <text x="980" y="374">· allow all, minus <tspan class="code-sm">network.deny</tspan></text>
+  <text x="980" y="394">· a secret only to its <tspan class="code-sm">allowedHosts</tspan></text>
+  <text x="980" y="414">· the host only for the Platform API</text>
+  <text x="980" y="434">· fails closed</text>
+</g>
+
+<rect class="box store" x="962" y="485" width="256" height="148" rx="10"/>
+<g transform="translate(980 497)">
+  <path d="M0,4 C0,-1 18,-1 18,4 L18,18 C18,23 0,23 0,18 Z" fill="#e3effb" stroke="#0062ba" stroke-width="1.2"/>
+  <path d="M0,4 C0,9 18,9 18,4" fill="none" stroke="#0062ba" stroke-width="1.2"/>
+</g>
+<text class="h" x="1006" y="512">SecretStore</text>
+<text class="s" x="980" y="538">real values in agent.db, owner-only,</text>
+<text class="s" x="980" y="555">with SQLite secure_delete</text>
+<text class="s" x="980" y="580">Claude and GitHub tokens as given;</text>
+<text class="s" x="980" y="597">Codex tokens refreshed by agentd</text>
+<text class="s" x="980" y="614">when they are resolved</text>
+
+<path class="edge" d="M1090,275 V301" marker-end="url(#arrow)"/>
+<path class="edge" d="M1218,240 H1229 V560 H1222" marker-end="url(#arrow)"/>
+<rect class="label-bg" x="1222" y="378" width="14" height="88" style="fill:#f1f7fd"/>
+<text class="code-sm" style="fill:#4a5b70" transform="translate(1233 422) rotate(-90)" text-anchor="middle">resolve if allowed</text>
+
+<!-- Control channel -->
+<path class="edge-coral" d="M855,202 H900"/>
+<path class="edge-coral" d="M855,304 H900"/>
+<path class="edge-coral" d="M855,508 H900"/>
+<path class="edge-coral" d="M855,610 H900 V202"/>
+<path class="edge-coral" d="M900,225 H958" marker-start="url(#arrow-coral)" marker-end="url(#arrow-coral)"/>
+<rect class="label-bg" x="891" y="352" width="28" height="136" rx="4"/>
+<text class="code-sm" style="fill:#b3262b" transform="translate(905 420) rotate(-90)" text-anchor="middle">network-control.v3</text>
+
+<!-- Internet -->
+<rect class="zone zone-ext" x="1280" y="570" width="280" height="240" rx="16"/>
+<text class="zone-label zone-ext-label" x="1302" y="596">INTERNET</text>
+
+<rect class="box" x="1280" y="130" width="280" height="300" rx="16" style="fill:#f8fafc"/>
+<text class="kicker" x="1306" y="162">BEFOREHAND</text>
+<text class="h-sm" x="1320" y="200">How a secret gets there</text>
+<g class="s">
+  <circle class="badge" cx="1329" cy="226" r="9"/><text class="step" x="1329" y="230" text-anchor="middle">1</text>
+  <text x="1346" y="231">The real value sits in the</text>
+  <text x="1346" y="248">manifest's <tspan class="code-sm">.env</tspan> on the host.</text>
+  <circle class="badge" cx="1329" cy="276" r="9"/><text class="step" x="1329" y="280" text-anchor="middle">2</text>
+  <text x="1346" y="281"><tspan class="code-sm">agentctl apply</tspan> stores it</text>
+  <text x="1346" y="298">in agent.db, never the VM.</text>
+  <circle class="badge" cx="1329" cy="326" r="9"/><text class="step" x="1329" y="330" text-anchor="middle">3</text>
+  <text x="1346" y="331">The guest variable gets an</text>
+  <text x="1346" y="348">inert placeholder instead.</text>
+  <circle class="badge" cx="1329" cy="376" r="9"/><text class="step" x="1329" y="380" text-anchor="middle">4</text>
+  <text x="1346" y="381">To rotate, change <tspan class="code-sm">.env</tspan></text>
+  <text x="1346" y="398">and apply again; nothing</text>
+  <text x="1346" y="415">is copied into the Sandbox.</text>
+</g>
+
+<rect class="box box-ext" x="1302" y="612" width="236" height="74" rx="10"/>
+<text class="h" x="1320" y="639">evil.example</text>
+<text class="s" x="1320" y="659">not in the secret's</text>
+<text class="code-sm" x="1320" y="676">allowedHosts</text>
+
+<rect class="box box-ext" x="1302" y="705" width="236" height="74" rx="10"/>
+<text class="h" x="1320" y="732">api.github.com</text>
+<text class="s" x="1320" y="752">in <tspan class="code-sm">allowedHosts</tspan>, receives</text>
+<text class="s" x="1320" y="769">the real token</text>
+
+<path class="blocked" d="M855,652 H1296" marker-end="url(#stop)"/>
+<rect class="label-bg" x="958" y="662" width="232" height="20" rx="4"/>
+<text class="s-sm" x="964" y="676" style="fill:#b3262b">other host: secret.use denied, request blocked</text>
+
+<path class="edge-green" d="M855,742 H1298" marker-end="url(#arrow-green)"/>
+<rect class="label-bg" x="958" y="752" width="262" height="20" rx="4"/>
+<text class="s-sm" x="964" y="766" style="fill:#1f7a52">allowed host: the real value, over a fresh TLS session</text>
+
+<!-- Legend -->
+<g transform="translate(40 848)">
+  <path class="edge-blue" d="M0,-4 H32" marker-end="url(#arrow-blue)"/>
+  <text class="legend" x="42" y="0">guest traffic</text>
+  <path class="edge-coral" d="M150,-4 H182" marker-end="url(#arrow-coral)"/>
+  <text class="legend" x="192" y="0">ask agentd, wait for the decision</text>
+  <path class="edge-green" d="M410,-4 H442" marker-end="url(#arrow-green)"/>
+  <text class="legend" x="452" y="0">mediated egress</text>
+  <path class="blocked" d="M570,-4 H602" marker-end="url(#stop)"/>
+  <text class="legend" x="616" y="0">blocked</text>
+</g>
+</svg>
