@@ -603,9 +603,7 @@ async fn without_command(home: &ControlPlaneHome, client: &Client) -> CommandRes
                 "This directory has the agent {}. What would you like to do?",
                 agent.metadata.name
             );
-            let problem = format::blocking_problem(&agent).map(|problem| format!("It cannot start: {problem}"));
-            let lines: Vec<&str> = std::iter::once(question.as_str()).chain(problem.as_deref()).collect();
-            if let Some(code) = agents_here_menu(home, client, &lines).await? {
+            if let Some(code) = agents_here_menu(home, client, &[&question]).await? {
                 return Ok(code);
             }
         }
