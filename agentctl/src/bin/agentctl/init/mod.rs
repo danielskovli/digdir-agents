@@ -44,7 +44,7 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client, confirmed: boo
             |name| format!("This directory already has the agent {name}."),
         );
         if !prompt::confirm_lines(&[&here, "Set up another one?"])? {
-            return Ok(agent.clone());
+            return Ok(None);
         }
     }
     let mut status = client.auth_status().await?;
