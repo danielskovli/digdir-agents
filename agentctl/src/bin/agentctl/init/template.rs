@@ -438,7 +438,7 @@ RUN GO_FILE=\"$(curl -fsSL 'https://go.dev/dl/?mode=json&include=all' | jq -r --
     && echo \"${{GO_FILE#* }}  /tmp/go.tar.gz\" | sha256sum -c - \\
     && tar -xzf /tmp/go.tar.gz -C /usr/local \\
     && rm /tmp/go.tar.gz \\
-    && go version
+    && HOME=/root go version
 ",
         version = version.unwrap_or_default()
     )
