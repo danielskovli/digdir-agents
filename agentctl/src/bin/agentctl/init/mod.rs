@@ -119,9 +119,6 @@ fn write_agent_directory(
     }
     let dockerfile = folder.join("Dockerfile");
     let dockerfile_text = template::dockerfile(tier, &choices.checkout, &toolchains);
-    for (path, contents) in image::support_files(&dockerfile_text) {
-        written.push((folder.join(image::SUPPORT_DIRECTORY).join(path), contents.to_owned()));
-    }
     written.push((dockerfile.clone(), dockerfile_text));
     written.push((folder.join(".dockerignore"), template::DOCKERIGNORE.to_owned()));
     let instructions = folder.join("instructions.md");
@@ -283,10 +280,10 @@ fn choose_tier() -> Result<Tier, Error> {
 
 /// Asks whether the agent clones the repository or works on this checkout, returning
 /// `agent.yaml`'s checkout and whether to create the agent from the worktree variant instead.
-/// Only a repository with a remote can be cloned.
+/// Only a repository on GitHub can be cloned.
 fn choose_checkout(root: &Path) -> Result<(Checkout, bool), Error> {
     let Some(remote) = remote(root) else {
-        eprintln!("This checkout has no remote to clone, so the agent works on it directly.");
+        eprintln!("This checkout is not on GitHub, so the agent works on it directly.");
         return Ok((Checkout::Mount, false));
     };
     let options = [
@@ -301,21 +298,19 @@ fn choose_checkout(root: &Path) -> Result<(Checkout, bool), Error> {
     Ok((Checkout::Clone(remote), worktree))
 }
 
-/// The repository to clone: `owner/name` on GitHub, else the `origin` remote's URL.
+/// The repository to clone, as `owner/name`: the base images clone only from GitHub.
 fn remote(root: &Path) -> Option<String> {
-    if let Some(repository) = crate::github::current_repository() {
-        return Some(repository.to_string());
-    }
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["remote", "get-url", "origin"])
+        .args(["remote", "-v"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
         .ok()?;
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    (output.status.success() && !url.is_empty()).then_some(url)
+    output.status.success().then_some(())?;
+    crate::github::repository_from_remotes(&String::from_utf8_lossy(&output.stdout))
+        .map(|repository| repository.to_string())
 }
 
 /// Asks for the agent's size, recommending one within `most` that fits this host and the free

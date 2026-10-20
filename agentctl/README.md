@@ -47,14 +47,15 @@ altinn-studio:
 | --- | --- |
 | `agent.yaml` | The manifest, with every setting a person is likely to change later; those that do not apply yet are commented out |
 | `agent.worktree.yaml` | A variant of a cloning `agent.yaml` that works on this checkout through a read-write mount instead |
-| `Dockerfile`, `common/` | The general stages of [`agents/base-ubuntu`](../agents/base-ubuntu) up to the one chosen, with the files they copy, and a last stage that installs each toolchain the repository declares, at the version it asks for: Node.js (`.nvmrc`, `engines`, Corepack for `packageManager`), .NET (`global.json`), Go (`go.mod`), Rust (`rust-toolchain.toml`), Python and Java. Docker on your machine builds it |
+| `Dockerfile` | Starts from an [`agentctl-base`](../images/agentctl-base) image and adds Podman for containers and each toolchain the repository declares, at the version it asks for: Node.js (`.nvmrc`, `engines`, Corepack for `packageManager`), .NET (`global.json`), Go (`go.mod`), Rust (`rust-toolchain.toml`), Python and Java, then runs `agent-image-check`. Docker on your machine builds it |
 | `instructions.md` | The agent's own instructions, installed for every harness beside the checkout's `CLAUDE.md` or `AGENTS.md` |
 | `home/` | Files copied into `/home/agent`, such as dotfiles |
 | `.env.sample` | Example plain values and secrets for `.env`, which `.gitignore` keeps out of Git with `agent.mine.yaml` |
 
-`init` asks what the agent should be able to do, which picks the image's last general stage and what the manifest
-gives it: writing code (`basic`), also building and running containers (`developer`, the default), also testing web
-apps in a headless browser (`web`), or also a desktop that `agentctl vnc` opens (`desktop`, with `access: vnc`). The
+`init` asks what the agent should be able to do, which picks the base image and what the manifest gives it: writing
+code (`ubuntu-26.04`), also building and running containers (that image with Podman, the default), also testing web
+apps in a browser (`ubuntu-26.04-desktop`), or also a desktop that `agentctl vnc` opens (the same image, with
+`access: vnc`). A fresh clone is offered for repositories on GitHub, which the base images clone at boot. The
 repository's own skills under `.claude/skills` are listed in the manifest, so every harness gets them. Without Docker,
 `init` writes the files and asks for Docker to be started before it creates the agent. The proposed size fits this machine:
 up to 4 CPUs, 8 GiB of memory and a disk of at most half the free space on the volume holding `~/.agent`, since an

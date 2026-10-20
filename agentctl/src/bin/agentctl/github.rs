@@ -351,7 +351,7 @@ pub(crate) fn current_repository() -> Option<Repository> {
 
 /// The GitHub repository `git remote -v` lists: `origin` when it is on GitHub, else the first
 /// remote that is.
-fn repository_from_remotes(remotes: &str) -> Option<Repository> {
+pub(crate) fn repository_from_remotes(remotes: &str) -> Option<Repository> {
     let mut found = remotes.lines().filter_map(|line| {
         let mut fields = line.split_whitespace();
         let name = fields.next()?;

@@ -276,59 +276,61 @@ pub(super) const DOCKERIGNORE: &str =
     "# The image's build context is this directory; only what the Dockerfile copies belongs in it.
 *
 !Dockerfile
-!common/
-!common/**
 ";
 
-/// The agent's Dockerfile: the general stages up to `tier`'s, then a stage of its own that clones
-/// `checkout` at boot and installs `toolchains`.
+/// The agent's Dockerfile: `tier`'s base image, Podman for containers when the tier has them,
+/// `checkout`'s clone at boot, `toolchains`, and the base image's check of the result.
 pub(super) fn dockerfile(tier: Tier, checkout: &Checkout, toolchains: &[Toolchain]) -> String {
     let code = agent::sandbox::platform::WORKING_DIRECTORY;
     let repositories = match checkout {
         Checkout::Clone(repository) => format!(
-            "# Repositories the agent clones into {code} at first boot, one per line: owner/name on
-# GitHub, or any URL Git can clone.
-RUN printf '%s\\n' '{repository}' >/etc/agent/repositories
+            "# Repositories the agent clones into {code} at first boot, one OWNER/NAME [DESTINATION] per line.
+RUN printf '%s\\n' '{repository}' >/etc/agent-workspace.d/workspace.list
 "
         ),
         Checkout::Mount => format!(
-            "# The agent works on the checkout mounted at {code}. To clone repositories at first boot
-# instead, list them here, one per line: owner/name on GitHub, or any URL Git can clone.
-# RUN printf '%s\\n' 'owner/name' >/etc/agent/repositories
+            "# The agent works on the checkout mounted at {code}. To clone GitHub repositories at first boot
+# instead, list them one OWNER/NAME [DESTINATION] per line:
+# RUN printf '%s\\n' 'owner/name' >/etc/agent-workspace.d/workspace.list
 "
         ),
+    };
+    let containers = if tier.has_containers() {
+        format!("\n{}", image::CONTAINERS)
+    } else {
+        String::new()
     };
     let blocks: String = toolchains
         .iter()
         .flat_map(|toolchain| ["\n".to_owned(), block(toolchain)])
         .collect();
-    let stage = tier.stage();
     format!(
         "# Created by `agentctl init`: the image this agent runs, built with Docker on the machine that
 # runs agentctl. An agent keeps the image it was created with, so to use changes, delete the agent
 # and create it again.
 #
-# The first stages are general, from agentctl's base image (agents/base-ubuntu in digdir-agents),
-# and the files they copy are in {support}/. The last stage is this repository's: change its
-# toolchain versions, remove what the agent does not need and add the rest.
+# It starts from an agentctl base image, which has what an agent needs: systemd, OpenSSH, the agent
+# user, the harnesses, Node.js, Git and the GitHub CLI. Pin its digest (`@sha256:…`) to rebuild the
+# same image later. Below are the tools this repository needs; change their versions, remove what
+# the agent does not need and add the rest.
+FROM {base}
 
-{stages}
-# This repository's agent, on the {stage} stage.
-FROM {stage} AS agent
 USER root
 ARG TARGETARCH
 
-{repositories}{blocks}
+{repositories}{containers}{blocks}
 # Add packages and tools here, for example:
 # RUN apt-get update \\
 #     && apt-get install --yes --no-install-recommends postgresql-client \\
 #     && rm -rf /var/lib/apt/lists/*
 
+# Reports anything the steps above left that the agent platform cannot use.
+RUN agent-image-check
+
 USER agent
 WORKDIR {code}
 ",
-        support = image::SUPPORT_DIRECTORY,
-        stages = image::stages(tier)
+        base = tier.base_image()
     )
 }
 
@@ -381,7 +383,8 @@ RUN case \"${{TARGETARCH}}\" in amd64) NODE_ARCH=x64 ;; arm64) NODE_ARCH=arm64 ;
     });
     let corepack = if corepack {
         "# The package manager package.json names, through Corepack.
-RUN npm install --global corepack \\
+RUN HOME=/root npm install --global corepack \\
+    && rm -rf /root/.npm \\
     && corepack enable
 "
     } else {
@@ -413,7 +416,7 @@ RUN apt-get update \\
     && bash /tmp/dotnet-install.sh --architecture \"${{DOTNET_ARCH}}\" --install-dir \"${{DOTNET_ROOT}}\" --no-path {selection} \\
     && ln -s \"${{DOTNET_ROOT}}/dotnet\" /usr/local/bin/dotnet \\
     && rm /tmp/dotnet-install.sh \\
-    && dotnet --version
+    && HOME=/root dotnet --version
 "
     )
 }
@@ -717,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn the_build_context_keeps_the_dockerfile_and_support_files_and_nothing_else() {
+    fn the_build_context_keeps_only_the_dockerfile() {
         // agentd reads .dockerignore with gitignore rules, matching each path or its parents.
         let directory = tempfile::TempDir::new().expect("temporary directory");
         std::fs::write(directory.path().join(".dockerignore"), DOCKERIGNORE).expect("dockerignore");
@@ -725,9 +728,7 @@ mod tests {
         assert!(builder.add(directory.path().join(".dockerignore")).is_none());
         let rules = builder.build().expect("rules");
         let excluded = |path: &str| rules.matched_path_or_any_parents(path, false).is_ignore();
-        for kept in ["Dockerfile", "common/vnc.socket", "common/bin/desktop"] {
-            assert!(!excluded(kept), "{kept} is sent to the build");
-        }
+        assert!(!excluded("Dockerfile"), "the Dockerfile is sent to the build");
         for left_out in [".env", "agent.yaml", "home/.bashrc", "instructions.md"] {
             assert!(excluded(left_out), "{left_out} stays out of the build");
         }
@@ -763,9 +764,10 @@ mod tests {
             ],
         );
         for expected in [
-            "\nFROM developer AS agent\n" as &str,
-            "FROM basic AS developer\n",
-            "RUN printf '%s\\n' 'digdir/worker' >/etc/agent/repositories\n",
+            "\nFROM ghcr.io/digdir/agentctl-base:ubuntu-26.04\n" as &str,
+            "podman-docker",
+            "\nRUN agent-image-check\n",
+            "RUN printf '%s\\n' 'digdir/worker' >/etc/agent-workspace.d/workspace.list\n",
             "ARG NODE_RELEASE=release/latest-v20.x\n",
             "corepack enable",
             "--version 10.0.302",
@@ -785,6 +787,15 @@ mod tests {
 
         let mounted = dockerfile(Tier::Basic, &Checkout::Mount, &[]);
         assert!(mounted.contains("# RUN printf"), "nothing is cloned: {mounted}");
+        assert!(
+            !mounted.contains("podman"),
+            "no containers for a basic agent: {mounted}"
+        );
+        let desktop = dockerfile(Tier::Desktop, &Checkout::Mount, &[]);
+        assert!(
+            desktop.contains("\nFROM ghcr.io/digdir/agentctl-base:ubuntu-26.04-desktop\n"),
+            "{desktop}"
+        );
         assert!(!mounted.contains("NODE_RELEASE"), "{mounted}");
     }
 
