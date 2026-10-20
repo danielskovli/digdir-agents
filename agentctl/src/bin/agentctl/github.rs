@@ -86,8 +86,6 @@ async fn attempt(client: &Client, source: Source, owner: Option<String>) -> Comm
         Source::Browser => {
             let expected = browser_friction()?;
             eprintln!();
-            eprintln!("The GitHub CLI signs in next. Its notes about configuration and plain-text credentials");
-            eprintln!("refer to a temporary sign-in that agentctl deletes right after.");
             let token = agent::github::token_from_gh_sign_in()?
                 .ok_or_else(|| Error::Invalid("`--browser` needs the GitHub CLI, `gh`, on this host".into()))?;
             (token, Some(expected))
