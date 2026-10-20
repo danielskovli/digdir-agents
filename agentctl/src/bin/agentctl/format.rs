@@ -211,6 +211,17 @@ fn measurement(measurement: Option<sandbox::progress::Measurement>) -> String {
     })
 }
 
+/// Why the agent cannot start until someone changes something, such as its manifest or a login:
+/// the Ready condition's message, when the latest pass failed in a way retrying cannot fix.
+pub(crate) fn blocking_problem(agent: &agent::Agent) -> Option<String> {
+    if agent.status.failure != Some(agent::FailureKind::Invalid) {
+        return None;
+    }
+    let message = agent.status.ready_condition()?.message.trim();
+    let message = message.strip_prefix("invalid Agent: ").unwrap_or(message);
+    (!message.is_empty()).then(|| message.to_owned())
+}
+
 pub(crate) const fn failure_kind(kind: agent::FailureKind) -> &'static str {
     match kind {
         agent::FailureKind::Invalid => "Invalid (change the agent to continue)",
@@ -335,6 +346,27 @@ fn row_line(values: &[String], widths: &[usize]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_failure_someone_must_fix_is_a_blocking_problem() {
+        let mut agent: Agent =
+            serde_yaml_ng::from_str(include_str!("../../../examples/minimal/agent.yaml")).expect("example manifest");
+        agent.status.conditions = vec![agent::Condition {
+            kind: "Ready".into(),
+            status: ConditionStatus::False,
+            reason: "SandboxReconcileFailed".into(),
+            message: "invalid Agent: the agent uses a GitHub account, but no token is stored".into(),
+            last_transition_time: None,
+        }];
+        assert_eq!(blocking_problem(&agent), None, "no failure recorded");
+        agent.status.failure = Some(agent::FailureKind::Transient);
+        assert_eq!(blocking_problem(&agent), None, "retried in the background");
+        agent.status.failure = Some(agent::FailureKind::Invalid);
+        assert_eq!(
+            blocking_problem(&agent).as_deref(),
+            Some("the agent uses a GitHub account, but no token is stored")
+        );
+    }
 
     #[test]
     fn describe_shows_the_failure_class_and_condition_age() {

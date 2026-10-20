@@ -18,8 +18,8 @@ use image::Tier;
 use template::{Checkout, Choices, Github};
 
 /// Sets up an Agent for the current directory, returning its name once it is Ready, or `None`
-/// when the user declined a step. `confirmed` says the person already agreed to set one up, so
-/// writing the agent directory is announced rather than asked.
+/// when the user declined a step. With an agent here already, it sets up another one in a new
+/// directory. `confirmed` says the person already agreed to set one up, so it is not asked again.
 ///
 /// # Errors
 ///
@@ -30,9 +30,22 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client, confirmed: boo
         return Err(Error::Invalid("agentctl init needs an interactive terminal".into()).into());
     }
     let directory = std::env::current_dir().map_err(Error::from)?;
-    if let Ok(agent) = client.resolve_agent_variant(directory.clone(), None).await {
-        eprintln!("This directory already has the agent {}.", agent.metadata.name);
-        return Ok(Some(agent.metadata.name));
+    // An agent already here, or several (which resolve as ambiguous), means setting up another.
+    let existing = match client.resolve_agent_variant(directory.clone(), None).await {
+        Ok(agent) => Some(Some(agent.metadata.name)),
+        Err(Error::Rpc(error)) if error.is_not_found() => None,
+        Err(_) => Some(None),
+    };
+    if let Some(agent) = &existing
+        && !confirmed
+    {
+        let here = agent.as_ref().map_or_else(
+            || "This directory already has agents.".to_owned(),
+            |name| format!("This directory already has the agent {name}."),
+        );
+        if !prompt::confirm_lines(&[&here, "Set up another one?"])? {
+            return Ok(agent.clone());
+        }
     }
     let mut status = client.auth_status().await?;
     if !status.any_harness() {
@@ -42,8 +55,9 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client, confirmed: boo
         status = client.auth_status().await?;
     }
     let github = github_account(client, &status).await;
-    let name = if crate::tui::working_tree_manifests(&directory).is_empty() {
-        let Some(manifest) = write_agent_directory(home, &directory, &github, &status, confirmed)? else {
+    let name = if existing.is_some() || crate::tui::working_tree_manifests(&directory).is_empty() {
+        let asked = confirmed || existing.is_some();
+        let Some(manifest) = write_agent_directory(home, &directory, &github, &status, asked)? else {
             return Ok(None);
         };
         create_written(client, &manifest).await?

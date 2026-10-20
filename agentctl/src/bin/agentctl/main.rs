@@ -599,8 +599,28 @@ async fn without_command(home: &ControlPlaneHome, client: &Client) -> CommandRes
     let directory = std::env::current_dir().map_err(Error::from)?;
     match client.resolve_agent_variant(directory, None).await {
         Ok(agent) => {
-            if prompt::confirm(&format!("Open the agent {} in agentctl tui?", agent.metadata.name))? {
-                return tui::run(home, client).await;
+            let options = [
+                "Open it in agentctl tui (recommended)".to_owned(),
+                "Set up another agent here".to_owned(),
+                "Show agentctl's help".to_owned(),
+            ];
+            let question = format!(
+                "This directory has the agent {}. What would you like to do?",
+                agent.metadata.name
+            );
+            let problem = format::blocking_problem(&agent).map(|problem| format!("It cannot start: {problem}"));
+            let lines: Vec<&str> = std::iter::once(question.as_str()).chain(problem.as_deref()).collect();
+            match prompt::choose_lines(&lines, &options, Some(0))? {
+                Some(0) => return tui::run(home, client).await,
+                Some(1) => {
+                    if let Some(name) = Box::pin(init::run(home, client, true)).await?
+                        && prompt::confirm(&format!("Open a session on {name} now?"))?
+                    {
+                        attach_new_session(home, client, &name).await?;
+                    }
+                    return Ok(ExitCode::SUCCESS);
+                }
+                _ => {}
             }
         }
         Err(Error::Rpc(error)) if error.is_not_found() => {
@@ -1953,11 +1973,14 @@ async fn status(home: &ControlPlaneHome, client: &Client) -> CommandResult<()> {
                 None => "Pending",
             };
             let sessions = client.list_sessions(Some(&agent.metadata.name)).await?.len();
-            format!(
-                "{}, {ready}, {sessions} session{}",
-                agent.metadata.name,
-                if sessions == 1 { "" } else { "s" }
-            )
+            match format::blocking_problem(&agent) {
+                Some(problem) => format!("{} cannot start: {problem}", agent.metadata.name),
+                None => format!(
+                    "{}, {ready}, {sessions} session{}",
+                    agent.metadata.name,
+                    if sessions == 1 { "" } else { "s" }
+                ),
+            }
         }
         Err(Error::Rpc(error)) if error.is_not_found() => "no agent: agentctl init".to_owned(),
         Err(error) => return Err(inference_error(error)),
