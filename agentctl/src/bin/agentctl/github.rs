@@ -151,7 +151,7 @@ async fn attempt(client: &Client, source: Source, owner: Option<String>) -> Comm
     eprint!("{}", summary(&inspection, owner.as_deref(), &warnings));
     if interactive {
         let question = format!(
-            "Agents will push and comment as {}. Use this token?",
+            "Agents will use GitHub as {}. Use this token?",
             inspection.account.login
         );
         if !prompt::confirm(&question)? {
@@ -159,13 +159,10 @@ async fn attempt(client: &Client, source: Source, owner: Option<String>) -> Comm
         }
     }
     let stored = client.github_login(token.to_string(), owner).await?;
-    println!(
-        "Agents in {} now act as {} and commit as {} <{}>",
-        stored.scope(),
-        stored.account.login,
-        stored.account.name,
-        stored.account.email
-    );
+    match &stored.owner {
+        Some(owner) => println!("Agents in {owner} now use GitHub as {}.", stored.account.login),
+        None => println!("Agents now use GitHub as {}.", stored.account.login),
+    }
     Ok(Attempt::Stored(stored))
 }
 
