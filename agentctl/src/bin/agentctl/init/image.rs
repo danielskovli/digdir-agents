@@ -35,15 +35,6 @@ impl Tier {
         }
     }
 
-    /// The base image the agent's Dockerfile starts from. The browser comes only with the desktop
-    /// image, so a web tier runs it without opening the desktop.
-    pub(super) const fn base_image(self) -> &'static str {
-        match self {
-            Self::Basic | Self::Developer => HEADLESS,
-            Self::Web | Self::Desktop => DESKTOP,
-        }
-    }
-
     /// Whether the agent's own stage installs Podman.
     pub(super) const fn has_containers(self) -> bool {
         !matches!(self, Self::Basic)
@@ -76,9 +67,15 @@ impl Tier {
     }
 }
 
+/// The base image for an agent with or without a browser. The browser comes only with the desktop
+/// image, so an agent that tests web apps runs it without opening the desktop.
+pub(crate) const fn base_image(browser: bool) -> &'static str {
+    if browser { DESKTOP } else { HEADLESS }
+}
+
 /// Podman for containers, with `docker` and `docker compose` working through it. agentd enables
 /// the Podman socket and grants it to the agent user when the image has Podman.
-pub(super) const CONTAINERS: &str = r"# Containers for builds and services: Podman, with `docker` and `docker compose` working through it.
+pub(crate) const CONTAINERS: &str = r"# Containers for builds and services: Podman, with `docker` and `docker compose` working through it.
 # netavark invokes nft for bridge networking and aardvark-dns resolves container names between
 # compose services.
 RUN apt-get update \
@@ -102,10 +99,10 @@ mod tests {
 
     #[test]
     fn tiers_map_onto_the_two_base_images() {
-        assert_eq!(Tier::Basic.base_image(), HEADLESS);
-        assert_eq!(Tier::Developer.base_image(), HEADLESS);
-        assert_eq!(Tier::Web.base_image(), DESKTOP);
-        assert_eq!(Tier::Desktop.base_image(), DESKTOP);
+        assert_eq!(base_image(Tier::Basic.has_browser()), HEADLESS);
+        assert_eq!(base_image(Tier::Developer.has_browser()), HEADLESS);
+        assert_eq!(base_image(Tier::Web.has_browser()), DESKTOP);
+        assert_eq!(base_image(Tier::Desktop.has_browser()), DESKTOP);
         assert!(!Tier::Basic.has_containers() && Tier::Developer.has_containers());
         assert!(Tier::Desktop.has_desktop() && !Tier::Web.has_desktop());
     }

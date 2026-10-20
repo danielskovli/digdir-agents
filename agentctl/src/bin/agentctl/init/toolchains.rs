@@ -14,7 +14,7 @@ pub(super) const BASE_NODE_MAJOR: u32 = 22;
 
 /// A toolchain the agent's image installs, with the version the repository asks for.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum Toolchain {
+pub(crate) enum Toolchain {
     /// Node.js beyond the base image's: another version, or Corepack for `packageManager`.
     Node {
         /// An exact version (`20.11.1`) or a major version (`20`).
@@ -35,7 +35,7 @@ pub(super) enum Toolchain {
 
 impl Toolchain {
     /// A short name for listing what was found.
-    pub(super) fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         let versioned = |name: &str, version: &Option<String>| {
             version
                 .as_ref()

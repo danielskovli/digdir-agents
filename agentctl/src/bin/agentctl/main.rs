@@ -24,6 +24,7 @@ mod launch;
 mod progress;
 mod prompt;
 mod self_update;
+mod tools;
 mod tui;
 
 use format::{condition_status, format_age, format_harnesses, session_state};
@@ -322,6 +323,17 @@ enum Command {
         #[command(subcommand)]
         command: InstructionsCommand,
     },
+    /// Show the tools an agent's image installs, from its folder's tools.yaml, and change them.
+    ///
+    /// The current directory's agent, or the one `--agent` names. After a change, it offers to
+    /// recreate the agent with the new tools.
+    Tools {
+        /// The agent whose tools to show or change.
+        #[arg(long, global = true)]
+        agent: Option<String>,
+        #[command(subcommand)]
+        command: Option<ToolsCommand>,
+    },
     /// Open the interactive terminal UI.
     Tui,
     /// Wait for a resource condition.
@@ -477,6 +489,22 @@ enum CodexCommand {
     },
     /// Say whether agents can use Codex; exits with 1 when no login is stored.
     Status,
+}
+
+#[derive(Subcommand)]
+enum ToolsCommand {
+    /// Add tools: an Ubuntu package such as `jq`, a toolchain such as `go@1.26`, `node@20`,
+    /// `dotnet`, `rust`, `python`, `java` or `maven`, an npm package as `npm:pnpm`, or
+    /// `containers` or `browser`.
+    Add {
+        #[arg(required = true)]
+        tools: Vec<String>,
+    },
+    /// Remove tools, named as for `add`.
+    Remove {
+        #[arg(required = true)]
+        tools: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -722,6 +750,14 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
         Command::Instructions {
             command: InstructionsCommand::Edit,
         } => edit_instructions(home)?,
+        Command::Tools { agent, command } => {
+            let (add, remove) = match command {
+                Some(ToolsCommand::Add { tools }) => (tools, Vec::new()),
+                Some(ToolsCommand::Remove { tools }) => (Vec::new(), tools),
+                None => (Vec::new(), Vec::new()),
+            };
+            tools::run(home, client, agent.as_deref(), &add, &remove).await?;
+        }
         Command::Github {
             command:
                 GithubCommand::Login {
@@ -782,12 +818,26 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
             timeout,
         } => {
             let filename = apply_manifest_path(filename, variant)?;
+            let folder = std::path::absolute(&filename)
+                .map_err(Error::from)?
+                .parent()
+                .map(Path::to_path_buf);
+            if let Some(folder) = &folder {
+                tools::sync(folder)?;
+            }
             let mut request = read_apply_request(filename, env_file)?;
             if let Some(name) = name {
                 request.agent.metadata.name = name;
             }
+            let new = matches!(
+                client.get(&request.agent.metadata.name).await,
+                Err(Error::Rpc(ref error)) if error.is_not_found()
+            );
             let applied = client.apply(request).await?;
             let name = applied.metadata.name;
+            if new && let Some(folder) = &folder {
+                tools::record(home, &name, folder);
+            }
             println!("agent/{name} applied");
             if wait {
                 let converged = wait_until_converged(client, &name, timeout).await?;
@@ -2000,12 +2050,25 @@ async fn status(home: &ControlPlaneHome, client: &Client) -> CommandResult<()> {
                 None => "Pending",
             };
             let sessions = client.list_sessions(Some(&agent.metadata.name)).await?.len();
+            let outdated = agent
+                .status
+                .provenance
+                .as_ref()
+                .and_then(|provenance| provenance.manifest_path.as_deref())
+                .and_then(Path::parent)
+                .and_then(|folder| tools::outdated(home, &agent.metadata.name, folder))
+                == Some(true);
             match format::blocking_problem(&agent) {
                 Some(problem) => format!("{} cannot start: {problem}", agent.metadata.name),
                 None => format!(
-                    "{}, {ready}, {sessions} session{}",
+                    "{}, {ready}, {sessions} session{}{}",
                     agent.metadata.name,
-                    if sessions == 1 { "" } else { "s" }
+                    if sessions == 1 { "" } else { "s" },
+                    if outdated {
+                        "; its tools changed since it was created: agentctl tools"
+                    } else {
+                        ""
+                    }
                 ),
             }
         }

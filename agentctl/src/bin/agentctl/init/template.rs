@@ -3,11 +3,7 @@
 
 use agent::harness::AuthenticationStatus;
 
-use super::{
-    image::{self, Tier},
-    sizing::Size,
-    toolchains::Toolchain,
-};
+use super::{image::Tier, sizing::Size, toolchains::Toolchain};
 
 /// The directory under the repository root that holds one directory per agent.
 pub(super) const AGENTS_DIRECTORY: &str = "agents";
@@ -279,9 +275,9 @@ pub(super) const DOCKERIGNORE: &str =
 !Dockerfile
 ";
 
-/// The agent's Dockerfile: `tier`'s base image, Podman for containers when the tier has them,
-/// `checkout`'s clone at boot, `toolchains`, and the base image's check of the result.
-pub(super) fn dockerfile(tier: Tier, checkout: &Checkout, toolchains: &[Toolchain]) -> String {
+/// The agent's Dockerfile: the block generated from `tools`, the clone of `checkout` at boot, a
+/// place for the person's own steps, and the base image's check of the result.
+pub(super) fn dockerfile(tools: &crate::tools::Tools, checkout: &Checkout) -> String {
     let code = agent::sandbox::platform::WORKING_DIRECTORY;
     let repositories = match checkout {
         Checkout::Clone(repository) => format!(
@@ -296,31 +292,16 @@ RUN printf '%s\\n' '{repository}' >/etc/agent-workspace.d/workspace.list
 "
         ),
     };
-    let containers = if tier.has_containers() {
-        format!("\n{}", image::CONTAINERS)
-    } else {
-        String::new()
-    };
-    let blocks: String = toolchains
-        .iter()
-        .flat_map(|toolchain| ["\n".to_owned(), block(toolchain)])
-        .collect();
     format!(
         "# Created by `agentctl init`: the image this agent runs, built with Docker on the machine that
-# runs agentctl. An agent keeps the image it was created with, so to use changes, delete the agent
-# and create it again.
+# runs agentctl. An agent keeps the image it was created with; `agentctl tools` offers to recreate
+# it after a change.
 #
-# It starts from an agentctl base image, which has what an agent needs: systemd, OpenSSH, the agent
-# user, the harnesses, Node.js, Git and the GitHub CLI. Pin its digest (`@sha256:…`) to rebuild the
-# same image later. Below are the tools this repository needs; change their versions, remove what
-# the agent does not need and add the rest.
-FROM {base}
-
-USER root
-ARG TARGETARCH
-
-{repositories}{containers}{blocks}
-# Add packages and tools here, for example:
+# The block below is generated from tools.yaml: change the tools there, or with
+# `agentctl tools add`. Steps of your own go after it, and agentctl leaves them as they are.
+{block}
+{repositories}
+# Steps of your own, for example:
 # RUN apt-get update \\
 #     && apt-get install --yes --no-install-recommends postgresql-client \\
 #     && rm -rf /var/lib/apt/lists/*
@@ -331,11 +312,11 @@ RUN agent-image-check
 USER agent
 WORKDIR {code}
 ",
-        base = tier.base_image()
+        block = tools.block()
     )
 }
 
-fn block(toolchain: &Toolchain) -> String {
+pub(crate) fn block(toolchain: &Toolchain) -> String {
     match toolchain {
         Toolchain::Node { version, corepack } => node(version.as_deref(), *corepack),
         Toolchain::Dotnet { sdk } => dotnet(sdk.as_deref()),
@@ -747,22 +728,22 @@ mod tests {
 
     #[test]
     fn the_dockerfile_clones_the_repository_and_installs_each_toolchain() {
+        let detected = [
+            Toolchain::Node {
+                version: Some("20".into()),
+                corepack: true,
+            },
+            Toolchain::Dotnet {
+                sdk: Some("10.0.302".into()),
+            },
+            Toolchain::Go { version: None },
+            Toolchain::Rust { channel: None },
+            Toolchain::Python,
+            Toolchain::Java { maven: true },
+        ];
         let written = dockerfile(
-            Tier::Developer,
+            &crate::tools::Tools::from_detected(&detected, true, false),
             &Checkout::Clone("digdir/worker".into()),
-            &[
-                Toolchain::Node {
-                    version: Some("20".into()),
-                    corepack: true,
-                },
-                Toolchain::Dotnet {
-                    sdk: Some("10.0.302".into()),
-                },
-                Toolchain::Go { version: None },
-                Toolchain::Rust { channel: None },
-                Toolchain::Python,
-                Toolchain::Java { maven: true },
-            ],
         );
         for expected in [
             "\nFROM ghcr.io/digdir/agentctl-base:ubuntu-26.04\n" as &str,
@@ -786,13 +767,13 @@ mod tests {
             "{written}"
         );
 
-        let mounted = dockerfile(Tier::Basic, &Checkout::Mount, &[]);
+        let mounted = dockerfile(&crate::tools::Tools::from_detected(&[], false, false), &Checkout::Mount);
         assert!(mounted.contains("# RUN printf"), "nothing is cloned: {mounted}");
         assert!(
             !mounted.contains("podman"),
             "no containers for a basic agent: {mounted}"
         );
-        let desktop = dockerfile(Tier::Desktop, &Checkout::Mount, &[]);
+        let desktop = dockerfile(&crate::tools::Tools::from_detected(&[], true, true), &Checkout::Mount);
         assert!(
             desktop.contains("\nFROM ghcr.io/digdir/agentctl-base:ubuntu-26.04-desktop\n"),
             "{desktop}"
@@ -817,7 +798,10 @@ mod tests {
             Toolchain::Python,
             Toolchain::Java { maven: false },
         ];
-        let written = dockerfile(Tier::Desktop, &Checkout::Clone("digdir/worker".into()), &all);
+        let written = dockerfile(
+            &crate::tools::Tools::from_detected(&all, true, true),
+            &Checkout::Clone("digdir/worker".into()),
+        );
         let mut continued = false;
         for line in written.lines() {
             let trimmed = line.trim_start();
