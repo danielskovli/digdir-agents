@@ -98,8 +98,8 @@ fn write_agent_directory(
         return Ok(None);
     }
     let repository = agent_name(&root);
-    let (kind, folder) = choose_kind(&root)?;
-    let name = qualified_name(&repository, &kind);
+    let (short_name, folder) = choose_short_name(&root, &repository)?;
+    let name = qualified_name(&repository, &short_name);
     let tier = choose_tier()?;
     let toolchains = toolchains::detect(&root);
     if !toolchains.is_empty() {
@@ -171,51 +171,55 @@ fn write_agent_directory(
     Ok(Some(chosen))
 }
 
-/// Asks what kind of agent this is, which names its directory under `agents/`, until the answer
-/// names a directory that does not exist yet.
-fn choose_kind(root: &Path) -> Result<(String, PathBuf), Error> {
+/// Asks what the agent should be called, which names its directory under `agents/`, until the
+/// answer names a directory that does not exist yet. A name typed with the repository in front,
+/// as the agent's full name has it, counts without it.
+fn choose_short_name(root: &Path, repository: &str) -> Result<(String, PathBuf), Error> {
     let agents = root.join(template::AGENTS_DIRECTORY);
     let suggestion = ["dev", "agent"]
         .into_iter()
-        .find(|kind| !agents.join(kind).exists())
+        .find(|name| !agents.join(name).exists())
         .map_or_else(|| "dev-2".to_owned(), str::to_owned);
     loop {
-        let answer = prompt::ask(&format!(
-            "What kind of agent is this, such as dev or reviewer? [{suggestion}]"
-        ))?;
-        let kind = if answer.is_empty() {
+        let answer = prompt::ask(&format!("What should the agent be called? [{suggestion}]"))?;
+        let answer = if answer.is_empty() {
             suggestion.clone()
         } else {
             answer.to_lowercase()
         };
-        if !is_kind(&kind) {
+        let short_name = answer
+            .strip_prefix(&format!("{repository}-"))
+            .filter(|rest| !rest.is_empty())
+            .unwrap_or(&answer)
+            .to_owned();
+        if !is_short_name(&short_name) {
             eprintln!("Use lowercase letters, digits and hyphens, starting with a letter or digit.");
             continue;
         }
-        let folder = agents.join(&kind);
+        let folder = agents.join(&short_name);
         if folder.exists() {
-            eprintln!("This repository already has a {kind} agent; choose another kind.");
+            eprintln!("This repository already has an agent called {short_name}; choose another name.");
             continue;
         }
-        return Ok((kind, folder));
+        return Ok((short_name, folder));
     }
 }
 
-fn is_kind(kind: &str) -> bool {
-    kind.starts_with(|character: char| character.is_ascii_alphanumeric())
-        && kind
+fn is_short_name(name: &str) -> bool {
+    name.starts_with(|character: char| character.is_ascii_alphanumeric())
+        && name
             .chars()
             .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-')
 }
 
-/// The agent's name: the repository and the kind, as in `altinn-minimal`, or the kind alone when
-/// together they are too long for a name.
-fn qualified_name(repository: &str, kind: &str) -> String {
-    let qualified = format!("{repository}-{kind}");
+/// The agent's full name: the repository and the short name, as in `altinn-minimal`, or the short
+/// name alone when together they are too long for a name.
+fn qualified_name(repository: &str, short_name: &str) -> String {
+    let qualified = format!("{repository}-{short_name}");
     if ::sandbox::SandboxName::new(qualified.clone()).is_ok() {
         qualified
     } else {
-        kind.to_owned()
+        short_name.to_owned()
     }
 }
 
@@ -349,11 +353,11 @@ fn choose_size(state: &Path, most: sizing::Size) -> Result<sizing::Size, Error> 
         ),
     ];
     if host.free_disk_gib < sizing::LOW_DISK_GIB {
-        lines.push(format!(
-            "⚠ That is little free disk: an agent's disk grows into it as the agent writes, up to its size. \
-             Free some space, or watch it with `df -h {}`.",
-            state.display()
-        ));
+        lines.push(
+            "⚠ Disk space is low here. An agent's disk uses space on this machine as it fills up, up to the size \
+             you pick below."
+                .to_owned(),
+        );
     }
     let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
     let options = [
@@ -552,12 +556,12 @@ mod tests {
     }
 
     #[test]
-    fn a_kind_names_a_directory_and_qualifies_the_agent_name() {
-        for kind in ["dev", "minimal", "full-2", "2nd"] {
-            assert!(is_kind(kind), "{kind}");
+    fn a_short_name_names_a_directory_and_qualifies_the_agent_name() {
+        for name in ["dev", "minimal", "full-2", "2nd"] {
+            assert!(is_short_name(name), "{name}");
         }
-        for kind in ["", "Dev", "-dev", "my agent", "a/b", "..", "dev_x"] {
-            assert!(!is_kind(kind), "{kind:?}");
+        for name in ["", "Dev", "-dev", "my agent", "a/b", "..", "dev_x"] {
+            assert!(!is_short_name(name), "{name:?}");
         }
         assert_eq!(qualified_name("altinn", "minimal"), "altinn-minimal");
         let long = "r".repeat(::sandbox::MAX_SANDBOX_NAME_BYTES);
