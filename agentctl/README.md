@@ -55,10 +55,10 @@ altinn-studio:
 | `home/` | Files copied into `/home/agent`, such as dotfiles |
 | `.env.sample` | Example plain values and secrets for `.env`, which `.gitignore` keeps out of Git with `agent.mine.yaml` |
 
-`init` asks what the agent should be able to do, which picks the base image and what the manifest gives it: writing
-code (`ubuntu-26.04`), also building and running containers (that image with Podman, the default), also testing web
-apps in a browser (`ubuntu-26.04-desktop`), or also a desktop that `agentctl vnc` opens (the same image, with
-`access: vnc`). A fresh clone is offered for repositories on GitHub, which the base images clone at boot. The
+`init` asks what the agent should be able to do, which picks what its image adds to the `ubuntu-26.04` base image and
+what the manifest gives it: writing code (nothing more), also building and running containers (Podman, the default),
+also testing web apps in a browser (the base image's `browser` feature), or also a desktop that `agentctl vnc` opens
+(its `desktop` feature, with `access: vnc`). A fresh clone is offered for repositories on GitHub, which the base images clone at boot. The
 repository's own skills under `.claude/skills` are listed in the manifest, so every harness gets them. Without Docker,
 `init` writes the files and asks for Docker to be started before it creates the agent. The proposed size fits this machine:
 up to 4 CPUs, 8 GiB of memory and a disk of at most half the free space on the volume holding `~/.agent`, since an
