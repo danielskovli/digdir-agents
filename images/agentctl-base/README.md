@@ -9,7 +9,8 @@ versions its adapters are tested with, so an Agent's Dockerfile only adds the to
 | `ghcr.io/digdir/agentctl-base:ubuntu-26.04-desktop` | The headless image plus the [`desktop` feature](#features): Chromium with `playwright-cli`, ffmpeg, and an X11 desktop with VNC access and the `computer-use` skill |
 
 Both are published for `linux/amd64` and `linux/arm64` from `main` whenever this directory changes, and also tagged
-`<tag>-sha-<commit>`. Pin a digest, which Renovate keeps current:
+`<tag>-sha-<commit>`. Pin a digest, which Renovate keeps current. The self-dev images are the exception: they build on
+the base from the same commit, so their `FROM` names the tag alone.
 
 ```dockerfile
 FROM ghcr.io/digdir/agentctl-base:ubuntu-26.04@sha256:…
@@ -81,7 +82,8 @@ USER agent
 | `browser` | Chromium with `playwright-cli` and its skill, ffmpeg, and the `video-to-gif` and `media-preview` helpers. Chromium trusts the Agent's mediated CA once `$XDG_RUNTIME_DIR/chromium-ca-ready` exists, shortly after boot. |
 | `desktop` | `browser`, plus an X11 desktop on display `:1` with VNC access, the `desktop`, `desktop-terminal` and `chromium` commands, and the `computer-use` skill. Provides `/etc/agent-access.d/vnc.conf`, so an Agent on it can declare `access: [{type: vnc}]`. |
 
-`agent-feature list` shows what an image has. The instructions about the desktop belong to the Agent; see the self-dev
+`agent-feature list` shows what an image has. The [self-dev images](../../agents/self-dev/Dockerfile) are built this
+way. The instructions about the desktop belong to the Agent; see the self-dev
 Agent's [desktop.md](../../agents/self-dev/full/desktop.md). The desktop image is the headless one after
 `agent-feature install desktop`.
 
