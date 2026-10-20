@@ -135,10 +135,10 @@ impl TokenKind {
     }
 
     /// How to revoke a token of this kind on GitHub, signed in as `login`, which forgetting it in
-    /// agentctl does not do.
+    /// agentctl does not do; `None` for the GitHub CLI's sign-in, whose token no one else ever held.
     #[must_use]
-    pub fn revoke_hint(self, login: &str) -> String {
-        match self {
+    pub fn revoke_hint(self, login: &str) -> Option<String> {
+        Some(match self {
             Self::FineGrained => format!(
                 "The fine-grained token stays valid on GitHub until it expires or you revoke it, signed in as {login}: \
                  https://github.com/settings/personal-access-tokens"
@@ -147,16 +147,14 @@ impl TokenKind {
                 "The classic token stays valid on GitHub until it expires or you revoke it, signed in as {login}: \
                  https://github.com/settings/tokens"
             ),
-            Self::Oauth => format!(
-                "The OAuth token from the GitHub CLI's sign-in stays valid until you revoke it, signed in as {login}, \
-                 under Authorized OAuth Apps → GitHub CLI: https://github.com/settings/applications. That also signs \
-                 the GitHub CLI out wherever else {login} uses it."
-            ),
+            // agentctl read it from a GitHub CLI configuration it deleted at once, so the only
+            // copy was agentd's.
+            Self::Oauth => return None,
             Self::Other => format!(
                 "The token stays valid on GitHub until you revoke it where it was made, signed in as {login}: \
                  https://github.com/settings/applications"
             ),
-        }
+        })
     }
 }
 

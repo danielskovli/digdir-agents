@@ -312,7 +312,9 @@ async fn forget(client: &Client, tokens: &[GithubToken], target: Logout, yes: bo
 fn revoke_lines(forgotten: &[GithubToken]) -> Vec<String> {
     let mut lines = Vec::new();
     for token in forgotten {
-        let line = token.kind.revoke_hint(&token.account.login);
+        let Some(line) = token.kind.revoke_hint(&token.account.login) else {
+            continue;
+        };
         if !lines.contains(&line) {
             lines.push(line);
         }
@@ -828,20 +830,23 @@ mod tests {
     }
 
     #[test]
-    fn each_forgotten_token_is_revoked_on_the_page_for_its_kind() {
+    fn each_forgotten_access_token_is_revoked_on_the_page_for_its_kind() {
         let signed_in = GithubToken {
             kind: TokenKind::of("gho_signed_in"),
             ..token(None, "danielskovli-agent")
         };
-        let lines = revoke_lines(&[signed_in.clone(), signed_in, token(Some("digdir"), "digdir-bot")]);
-        assert_eq!(lines.len(), 2, "one line per kind and account: {lines:?}");
-        assert!(
-            lines[0].contains("settings/applications") && lines[0].contains("GitHub CLI"),
-            "{lines:?}"
+        let lines = revoke_lines(&[
+            signed_in,
+            token(Some("digdir"), "digdir-bot"),
+            token(Some("ssb"), "digdir-bot"),
+        ]);
+        assert_eq!(
+            lines.len(),
+            1,
+            "nothing for the sign-in's token, one line per kind and account: {lines:?}"
         );
-        assert!(lines[0].contains("signed in as danielskovli-agent"), "{lines:?}");
         assert!(
-            lines[1].contains("settings/personal-access-tokens") && lines[1].contains("digdir-bot"),
+            lines[0].contains("settings/personal-access-tokens") && lines[0].contains("digdir-bot"),
             "{lines:?}"
         );
         let classic = revoke_lines(&[token(None, "someone")]);
