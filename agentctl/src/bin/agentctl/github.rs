@@ -301,12 +301,24 @@ async fn forget(client: &Client, tokens: &[GithubToken], target: Logout, yes: bo
         if forgotten.len() == 1 { "" } else { "s" },
         if forgotten.len() == 1 { "it" } else { "them" }
     );
-    println!("They remain valid on GitHub until revoked: {REVOKE_URL}");
+    for line in revoke_lines(&forgotten) {
+        println!("{line}");
+    }
     Ok(())
 }
 
-/// Where tokens are revoked on GitHub: forgetting one here does not.
-const REVOKE_URL: &str = "https://github.com/settings/personal-access-tokens";
+/// How to revoke each forgotten token on GitHub, which forgetting it here does not: on the page
+/// for its kind, signed in as its account.
+fn revoke_lines(forgotten: &[GithubToken]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for token in forgotten {
+        let line = token.kind.revoke_hint(&token.account.login);
+        if !lines.contains(&line) {
+            lines.push(line);
+        }
+    }
+    lines
+}
 
 /// The menu `logout` offers: one entry per stored token, then everywhere.
 fn logout_choices(tokens: &[GithubToken]) -> Vec<(String, Logout)> {
@@ -813,5 +825,26 @@ mod tests {
         let several = named(&tokens, "shared-bot").expect_err("acts for two owners");
         assert!(several.to_string().contains("altinn, ssb"), "{several}");
         named(&tokens, "nobody").expect_err("no such token");
+    }
+
+    #[test]
+    fn each_forgotten_token_is_revoked_on_the_page_for_its_kind() {
+        let signed_in = GithubToken {
+            kind: TokenKind::of("gho_signed_in"),
+            ..token(None, "danielskovli-agent")
+        };
+        let lines = revoke_lines(&[signed_in.clone(), signed_in, token(Some("digdir"), "digdir-bot")]);
+        assert_eq!(lines.len(), 2, "one line per kind and account: {lines:?}");
+        assert!(
+            lines[0].contains("settings/applications") && lines[0].contains("GitHub CLI"),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains("signed in as danielskovli-agent"), "{lines:?}");
+        assert!(
+            lines[1].contains("settings/personal-access-tokens") && lines[1].contains("digdir-bot"),
+            "{lines:?}"
+        );
+        let classic = revoke_lines(&[token(None, "someone")]);
+        assert!(classic[0].contains("settings/tokens"), "{classic:?}");
     }
 }
