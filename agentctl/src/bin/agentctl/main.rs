@@ -599,28 +599,26 @@ async fn without_command(home: &ControlPlaneHome, client: &Client) -> CommandRes
     let directory = std::env::current_dir().map_err(Error::from)?;
     match client.resolve_agent_variant(directory, None).await {
         Ok(agent) => {
-            let options = [
-                "Open it in agentctl tui (recommended)".to_owned(),
-                "Set up another agent here".to_owned(),
-                "Show agentctl's help".to_owned(),
-            ];
             let question = format!(
                 "This directory has the agent {}. What would you like to do?",
                 agent.metadata.name
             );
             let problem = format::blocking_problem(&agent).map(|problem| format!("It cannot start: {problem}"));
             let lines: Vec<&str> = std::iter::once(question.as_str()).chain(problem.as_deref()).collect();
-            match prompt::choose_lines(&lines, &options, Some(0))? {
-                Some(0) => return tui::run(home, client).await,
-                Some(1) => {
-                    if let Some(name) = Box::pin(init::run(home, client, true)).await?
-                        && prompt::confirm(&format!("Open a session on {name} now?"))?
-                    {
-                        attach_new_session(home, client, &name).await?;
-                    }
-                    return Ok(ExitCode::SUCCESS);
-                }
-                _ => {}
+            if let Some(code) = agents_here_menu(home, client, &lines).await? {
+                return Ok(code);
+            }
+        }
+        // Several agents match this directory, such as a repository with more than one.
+        Err(Error::Rpc(error)) if error.is_invalid_params() => {
+            if let Some(code) = agents_here_menu(
+                home,
+                client,
+                &["This directory has several agents. What would you like to do?"],
+            )
+            .await?
+            {
+                return Ok(code);
             }
         }
         Err(Error::Rpc(error)) if error.is_not_found() => {
@@ -637,6 +635,28 @@ async fn without_command(home: &ControlPlaneHome, client: &Client) -> CommandRes
     }
     Arguments::command().print_help().map_err(Error::from)?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Offers what to do where agents already exist: open the TUI, set up another agent, or neither,
+/// which leaves the help to the caller.
+async fn agents_here_menu(home: &ControlPlaneHome, client: &Client, lines: &[&str]) -> CommandResult<Option<ExitCode>> {
+    let options = [
+        "Open agentctl tui (recommended)".to_owned(),
+        "Set up another agent here".to_owned(),
+        "Show agentctl's help".to_owned(),
+    ];
+    match prompt::choose_lines(lines, &options, Some(0))? {
+        Some(0) => tui::run(home, client).await.map(Some),
+        Some(1) => {
+            if let Some(name) = Box::pin(init::run(home, client, true)).await?
+                && prompt::confirm(&format!("Open a session on {name} now?"))?
+            {
+                attach_new_session(home, client, &name).await?;
+            }
+            Ok(Some(ExitCode::SUCCESS))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// What to ask when the current directory has no agent: to create one from the manifest already
@@ -1983,6 +2003,7 @@ async fn status(home: &ControlPlaneHome, client: &Client) -> CommandResult<()> {
             }
         }
         Err(Error::Rpc(error)) if error.is_not_found() => "no agent: agentctl init".to_owned(),
+        Err(Error::Rpc(error)) if error.is_invalid_params() => "several agents: agentctl tui".to_owned(),
         Err(error) => return Err(inference_error(error)),
     };
     rows.push(("This directory", here));
