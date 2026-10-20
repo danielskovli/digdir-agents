@@ -390,20 +390,27 @@ fn choose_tier() -> Result<Tier, Error> {
 /// `agent.yaml`'s checkout and whether to create the agent from the worktree variant instead.
 /// Only a repository on GitHub can be cloned.
 fn choose_checkout(root: &Path) -> Result<(Checkout, bool), Error> {
+    let folder = home_relative(root);
     let Some(remote) = remote(root) else {
-        eprintln!("This checkout is not on GitHub, so the agent works on it directly.");
+        eprintln!("\nThe agent gets {folder} mounted, since there's no GitHub repository to clone.");
         return Ok((Checkout::Mount, false));
     };
     let options = [
-        format!("A fresh clone of {remote}, made in the agent (recommended)"),
-        "This checkout, shared with the agent: its changes land on this machine directly".to_owned(),
+        format!("A fresh clone of {remote}, inside the agent (recommended)"),
+        format!("{folder}, mounted into the agent: its edits change your files directly"),
     ];
-    let worktree = prompt::choose(
-        "Which copy of the repository should the agent work on?",
-        &options,
-        Some(0),
-    )? == Some(1);
+    let worktree = prompt::choose("Which files should the agent work on?", &options, Some(0))? == Some(1);
     Ok((Checkout::Clone(remote), worktree))
+}
+
+/// `path` with the home directory written as `~`, as people read paths.
+fn home_relative(path: &Path) -> String {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|home| path.strip_prefix(&home).ok().map(|rest| Path::new("~").join(rest)))
+        .unwrap_or_else(|| path.to_path_buf())
+        .display()
+        .to_string()
 }
 
 /// The repository to clone, as `owner/name`: the base images clone only from GitHub.
@@ -640,6 +647,16 @@ mod tests {
         assert_eq!(qualified_name("altinn", "minimal"), "altinn-minimal");
         let long = "r".repeat(::sandbox::MAX_SANDBOX_NAME_BYTES);
         assert_eq!(qualified_name(&long, "dev"), "dev", "too long together");
+    }
+
+    #[test]
+    fn paths_under_home_read_with_a_tilde() {
+        let home = std::env::var_os("HOME").map(PathBuf::from).expect("HOME");
+        assert_eq!(
+            home_relative(&home.join("Git/demo")),
+            format!("~{}Git/demo", std::path::MAIN_SEPARATOR)
+        );
+        assert_eq!(home_relative(Path::new("/opt/demo")), "/opt/demo");
     }
 
     #[test]
