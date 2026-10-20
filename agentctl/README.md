@@ -31,6 +31,38 @@ irm https://raw.githubusercontent.com/digdir/digdir-agents/main/agentctl/install
 
 Update an installation with `agentctl self update`.
 
+Then, in any repository, run `agentctl init`. It offers the Claude Code or Codex login when neither is stored, and the
+GitHub account login when none is, writes an agent directory when the checkout has no manifest, and creates the Agent.
+Once the Agent is Ready it offers to open a Session. Before creating the agent it offers to open the written files in
+`$VISUAL` or `$EDITOR`, since the image,
+resources, mounts and access cannot change once the agent exists. `agentctl status` shows agentd, the stored logins
+and the current directory's agent at a glance, and `agentctl claude status` and `agentctl codex status` exit with 1
+when that login is missing.
+
+`init` asks what kind of agent it is, such as `dev` or `minimal`, and writes `agents/<kind>/` at the repository root,
+naming the agent `<repository>-<kind>` and laying the directory out like the Agents in this repository and in
+altinn-studio:
+
+| File | What it is |
+| --- | --- |
+| `agent.yaml` | The manifest, with every setting a person is likely to change later; those that do not apply yet are commented out |
+| `agent.worktree.yaml` | A variant of a cloning `agent.yaml` that works on this checkout through a read-write mount instead |
+| `Dockerfile`, `common/` | The general stages of [`agents/base-ubuntu`](../agents/base-ubuntu) up to the one chosen, with the files they copy, and a last stage that installs each toolchain the repository declares, at the version it asks for: Node.js (`.nvmrc`, `engines`, Corepack for `packageManager`), .NET (`global.json`), Go (`go.mod`), Rust (`rust-toolchain.toml`), Python and Java. Docker on your machine builds it |
+| `instructions.md` | The agent's own instructions, installed for every harness beside the checkout's `CLAUDE.md` or `AGENTS.md` |
+| `home/` | Files copied into `/home/agent`, such as dotfiles |
+| `.env.sample` | Example plain values and secrets for `.env`, which `.gitignore` keeps out of Git with `agent.mine.yaml` |
+
+`init` asks what the agent should be able to do, which picks the image's last general stage and what the manifest
+gives it: writing code (`basic`), also building and running containers (`developer`, the default), also testing web
+apps in a headless browser (`web`), or also a desktop that `agentctl vnc` opens (`desktop`, with `access: vnc`). The
+repository's own skills under `.claude/skills` are listed in the manifest, so every harness gets them. Without Docker,
+`init` writes the files and asks for Docker to be started before it creates the agent. The proposed size fits this machine:
+up to 4 CPUs, 8 GiB of memory and a disk of at most half the free space on the volume holding `~/.agent`, since an
+agent's disk takes host space as the agent writes, up to its size. Edit the files like any others. `agentctl` on its own asks
+whether to open the current directory's Agent in `agentctl tui`, or to set one up when there is none, and prints the
+help when you decline. `attach`, `exec` and `ssh` likewise offer `init` when they would use the current directory's
+Agent and find none. Both ask only when a person is at the terminal; scripts get the usual error.
+
 ## Development
 
 Run `make help` at the repository root for the supported development commands. `make user-install` builds, packages and
@@ -81,7 +113,9 @@ The Sandbox crates do not depend on Agent automation.
 
 `agentd` owns the durable desired state and all lifecycle effects. `agentctl` starts the adjacent daemon on demand and
 communicates through the versioned local control API. Its resource-oriented commands follow `verb resource [name]`;
-Session scope is explicit through `--agent` or inferred from the closest unique persisted Agent source directory.
+Session scope is explicit through `--agent` or inferred from the closest unique persisted Agent source directory: the
+manifest's directory, a bind-mounted host directory, or, least specifically, the Git checkout the manifest is in, so an
+Agent defined in `agents/<name>/` is found from anywhere in its repository.
 Transient `exec` commands similarly converge the Agent first, then target its exact materialized Sandbox without
 creating durable Session state or taking Sandbox lifecycle ownership away from `agentd`.
 
@@ -137,6 +171,12 @@ Archiving a Session stops its harness once any turn in progress ends, but not fo
 for a minute, and keeps it stopped until the Session is unarchived; it keeps its name and conversation, and the next
 attach resumes it.
 
+Each launch tells the harness where it runs: `AGENT_NAME`, `AGENT_SESSION_NAME`, `AGENT_HOST` and
+`AGENT_SOURCE_DIRECTORY` (the agent's directory on the host) are set beside `AGENT_SESSION_ID`, so instructions can ask
+an agent to name itself, for example in a shared task list. Inside the Sandbox, `agent-session` lists the agent's
+Sessions by name and `agent-session NAME` attaches to one. Interactive login shells, such as `agentctl ssh`, start with
+a short reminder of the tmux keys, and the tmux status bar shows the Session's name and how to detach.
+
 Tmux is the current Session runtime, not a security boundary or a permanent generic driver abstraction. A second
 runtime must establish the common interface before one is introduced.
 
@@ -150,7 +190,7 @@ repositories they can access, and image init may make a simple best-effort check
 `spec.sandbox.mounts` can instead attach caller-owned host directories or temporary memory filesystems when the selected
 Sandbox Provider supports them; these attachments are immutable for the Agent incarnation.
 
-`spec.home` is a continuously applied overlay onto `/home/agent`. It converges files supplied by the builder but does
+`spec.home`, when given, is a continuously applied overlay onto `/home/agent`. It converges files supplied by the builder but does
 not delete guest files that disappear from the source. Builders may use it to own harness configuration explicitly,
 with the consequence that those files are reapplied on every Agent pass.
 
@@ -165,14 +205,18 @@ cannot be optional.
 Each installation may declare `defaults` with a `model` and an `effort` level for its new Sessions, in the harness's
 own vocabulary. The published manifests select `model: fable` for Claude Code because a mediated token cannot list
 Fable in the `/model` picker.
-`spec.instructions` names one harness-neutral Agent instruction file. Every declared Harness Adapter installs that source
+`agentctl instructions edit` opens the host-wide instructions file, `~/.agent/instructions.md`, which every agent on
+the host receives ahead of its own instructions, within one reconciliation pass and without being recreated; emptying
+it gives agents none. `spec.instructions` names one harness-neutral Agent instruction file. Every declared Harness Adapter installs that source
 at its global instruction location: `~/.claude/CLAUDE.md` for Claude Code, `~/.codex/AGENTS.md` for Codex and
 `~/.pi/agent/AGENTS.md` for Pi.
 Repository-local instruction files continue to be discovered by the harness itself.
 
 Harness Adapters own authentication, version verification, managed configuration, hooks, native conversation IDs and
 launch arguments. The current adapters support Claude Code, Codex CLI and Pi. Harness-owned mutable state is seeded by
-the image or the user and is not used as a trusted bootstrap marker.
+the image or the user and is not used as a trusted bootstrap marker. The one exception: a Sandbox with no Claude Code
+state yet gets a state file with Claude Code's first-run questions answered, so Sessions start at the prompt; an
+existing state file is never rewritten.
 
 ### Pi
 
@@ -232,6 +276,8 @@ material into the Sandbox. A custom placeholder is optional for clients that val
 Set `optional: true` when a missing or empty environment-file value should omit that secret binding instead of
 rejecting the Agent apply. Required secrets remain the default.
 
+`spec.network` may be omitted; it then defaults to `mode: mediated` and `allow: all`.
+
 Policy is evaluated for live Sandbox-originated operations and fails closed when the destination, authorization,
 secret resolution or trusted mediation path is unavailable. Host-destined traffic is restricted to the registered
 Platform API endpoint. This authorization is separate from authorization of users calling the host Agent API.
@@ -240,6 +286,39 @@ build steps through standard trust paths. An OCI hook copies the bundle into the
 than bind-mounting it, so package managers can still replace the bundle, and it adds the mediator CA as a trust
 anchor so a regenerated bundle keeps trusting mediation. Docker and dockerd are not covered by this convenience
 wiring.
+
+## GitHub accounts
+
+agentd keeps GitHub tokens for Agents, one per owner, separate from any `gh` login on the host, so Agents can act as
+their own account, such as a bot, while you keep using yours.
+
+`agentctl github login` walks through creating a fine-grained token for the owner of the current directory's
+repository, or `--owner`. It opens GitHub's token form with the name, owner, a 90-day lifetime and the permissions
+filled in: contents, issues, pull requests, Actions and workflow files read and write, and commit statuses read. You
+pick the repositories, the one thing the form cannot be given, and paste the token. agentctl then asks GitHub which
+account it acts as, whether it can see the repository and when it expires, and shows that before anything is stored.
+It warns when the account is also your own `gh` login, is not named like an automation account (`…-bot`, `…-agent`),
+cannot see the repository, or expires within a week, and then asks for confirmation. Yes-or-no questions have no
+default: they take `y` or `n`, never a bare Enter.
+
+A fine-grained token is kept for its owner. A classic or OAuth token reaches every owner and is kept for every
+organization without a token of its own: `--from-stdin` reads any token, `--from-gh` imports the host's own `gh`
+login, and `--browser` runs the GitHub CLI's browser sign-in against a throwaway configuration. Because that token
+reaches every repository the account can, `--browser` first asks you to type the account's login and refuses a
+sign-in as any other. `agentctl github list` shows each token's owner, account, kind and expiry. `agentctl github logout` forgets one, chosen from a list
+that ends with "everywhere", and `agentctl github reset` forgets them all after a warning. Agents lose GitHub access on
+their next pass; the token stays valid on GitHub until revoked there.
+
+An Agent opts in with `spec.accounts: [{type: github, owner: digdir}]`, and uses its owner's token, else the one for every organization without a token of its own;
+without `owner`, the only stored token. Its Sandbox then sees an inert `GITHUB_TOKEN`, which the network mediator
+replaces only in requests to `github.com`, `api.github.com`, `gist.github.com` and `uploads.github.com`; a manifest
+cannot widen that list. An expired token stops the Agent's reconciliation with an error naming the login to run. The
+token's account name and email, or its noreply address, become the Agent's Git identity unless the manifest selects
+`GIT_USER_NAME` and `GIT_USER_EMAIL` itself. When the image has Git, setup also gives Git the token for GitHub over
+HTTPS and rewrites GitHub's SSH URLs to HTTPS, since the Sandbox has no SSH key, unless the image configured either
+itself. A manifest with the account cannot also bind its own `GITHUB_TOKEN`. Changing the account a token acts as
+changes that identity, which restarts the Agent's running Sandbox on its next pass, as any change to a Sandbox's
+environment does.
 
 SQLite `secure_delete` and owner-only filesystem permissions provide local hygiene. They are not a cryptographic
 erasure guarantee across WAL history, filesystem snapshots or backups.

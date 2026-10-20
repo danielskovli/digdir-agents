@@ -16,12 +16,25 @@ Agents. The Rust workspace version is a build detail and is not tracked here.
 
 - Agent images can build on `ghcr.io/digdir/agentctl-base:ubuntu-26.04`, or `ubuntu-26.04-desktop` for Chromium and a VNC desktop, which ship Claude Code, Codex and Pi at the tested versions. `agent-feature install browser` or `desktop` adds those parts to an image's own stage, and `agent-image-check` reports what an image still lacks. ([base images](https://github.com/digdir/digdir-agents/tree/main/images/agentctl-base), [image contract](https://github.com/digdir/digdir-agents/blob/main/agentctl/IMAGE.md), [#187](https://github.com/digdir/digdir-agents/pull/187))
 - Agents can offer Pi (`type: pi`) as a third harness, configured entirely by the Agent: its providers, models and keys come from its own `~/.pi/agent/` files and `spec.secrets`. Adding Pi to an existing Agent means deleting and re-applying it. ([agentctl/README.md](https://github.com/digdir/digdir-agents/tree/main/agentctl#pi), [#182](https://github.com/digdir/digdir-agents/pull/182))
+- `agentctl instructions edit` sets instructions that every agent on this host receives ahead of its own, such as how you track work. ([agentctl](https://github.com/digdir/digdir-agents/tree/main/agentctl#images-home-and-harnesses))
+- Sessions know where they run: `AGENT_NAME`, `AGENT_SESSION_NAME`, `AGENT_HOST` and `AGENT_SOURCE_DIRECTORY` are set for the harness, so instructions can ask an agent to name itself. ([agentctl](https://github.com/digdir/digdir-agents/tree/main/agentctl#agent-layer))
+- Inside an agent, `agent-session` lists its sessions by name and `agent-session NAME` attaches to one. Shells opened with `agentctl ssh` start with a short reminder of the tmux keys, and the tmux status bar shows the session's name and how to detach. ([agentctl](https://github.com/digdir/digdir-agents/tree/main/agentctl#agent-layer))
+- `agentctl status` shows agentd, your Claude Code, Codex and GitHub logins and the current directory's agent at a glance; `agentctl claude status` and `agentctl codex status` check one login. ([install](https://github.com/digdir/digdir-agents/tree/main/agentctl#install))
+- `agentctl init` sets up an Agent for the repository you are in: it signs you in where needed, writes an `agents/<kind>/` directory, named for the kind of agent you choose, when the repository has no agent, creates the agent and offers to open a session. The directory holds a manifest with the settings you are likely to change later, a variant that works on your checkout instead of a clone, instructions, a home overlay and an `.env` sample, and a Dockerfile for what you want the agent to do, from writing code to using a desktop, that installs the Node.js, .NET, Go, Rust, Python and Java versions the repository declares. The agent gets a size that fits your machine's CPUs, memory and free disk. ([install](https://github.com/digdir/digdir-agents/tree/main/agentctl#install))
+- `agentctl github login` walks you through creating a fine-grained GitHub token for Agents, one per organization, separate from your own `gh` login, checks what it can do before storing it, and `agentctl github list`, `logout` and `reset` show and remove them. Agents whose manifest lists `accounts: [{type: github, owner: …}]` use it for `gh`, `git push` and the GitHub API and commit as its account, with no `.env` file. ([GitHub accounts](https://github.com/digdir/digdir-agents/tree/main/agentctl#github-accounts))
 
 ### Changed
 
 - Sessions are tested with Claude Code 2.1.302 and Codex CLI 0.163.0, so Agents with their own images can install these versions. ([#181](https://github.com/digdir/digdir-agents/pull/181))
 - Session terminals encode modified keys as CSI u on tmux 3.5 and later, for every harness, so Shift+Enter inserts a newline in Codex. ([#182](https://github.com/digdir/digdir-agents/pull/182))
 - `spec.harnesses[].auth` may be omitted; it follows from the harness. ([#182](https://github.com/digdir/digdir-agents/pull/182))
+- `attach`, `exec`, `ssh` and the other commands that use the current directory's agent find one defined in a subdirectory, such as `agents/<name>/`, from anywhere in its repository. ([agentctl](https://github.com/digdir/digdir-agents/tree/main/agentctl#agent-layer))
+- `agentctl` on its own, and `attach`, `exec` or `ssh` in a directory without an Agent, ask whether to open or set up the Agent there, instead of only printing help or an error. ([install](https://github.com/digdir/digdir-agents/tree/main/agentctl#install))
+- An Agent manifest no longer needs `home` or `network`: without `home` nothing is copied into `/home/agent`, and without `network` all traffic goes through the host's network mediator, as before.
+
+### Fixed
+
+- A new agent's first session starts at Claude Code's prompt instead of its theme picker, security notes, folder trust question and bypass-permissions warning, whatever image the agent uses. ([agentctl](https://github.com/digdir/digdir-agents/tree/main/agentctl#images-home-and-harnesses))
 
 ### Security
 
