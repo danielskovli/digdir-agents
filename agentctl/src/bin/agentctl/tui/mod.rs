@@ -229,6 +229,7 @@ async fn drive(home: &ControlPlaneHome, client: &Client, mode: Mode) -> CommandR
                 app.connection_error = None;
                 forwards.prune(&resources.agents);
                 app.apply_snapshot(resources.agents, resources.sessions);
+                app.outdated = crate::tools::outdated_agents(home, &app.agents);
                 continue;
             }
             Input::Resources(Err(error)) => {

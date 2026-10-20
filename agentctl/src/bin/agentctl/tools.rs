@@ -520,6 +520,24 @@ pub(crate) fn outdated(home: &ControlPlaneHome, agent: &str, directory: &Path) -
     Some(digest(&projected(directory)?) != recorded)
 }
 
+/// The agents among `agents` whose tools changed since they were created.
+pub(crate) fn outdated_agents(home: &ControlPlaneHome, agents: &[agent::Agent]) -> std::collections::HashSet<String> {
+    agents
+        .iter()
+        .filter(|agent| {
+            agent
+                .status
+                .provenance
+                .as_ref()
+                .and_then(|provenance| provenance.manifest_path.as_deref())
+                .and_then(Path::parent)
+                .and_then(|folder| outdated(home, &agent.metadata.name, folder))
+                == Some(true)
+        })
+        .map(|agent| agent.metadata.name.clone())
+        .collect()
+}
+
 /// The folder whose tools `agentctl tools` changes: the current directory's agent's, with that
 /// agent and the manifest it was created from, or else the current directory when it has a
 /// `tools.yaml`.
