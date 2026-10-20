@@ -624,8 +624,19 @@ async fn without_command(home: &ControlPlaneHome, client: &Client) -> CommandRes
             }
         }
         Err(Error::Rpc(error)) if error.is_not_found() => {
-            if prompt::confirm(&set_up_question())? {
-                if let Some(name) = Box::pin(init::run(home, client, true)).await?
+            let manifests = tui::working_tree_manifests(&std::env::current_dir().map_err(Error::from)?);
+            let start = if manifests.is_empty() {
+                prompt::confirm("No agent was set up for this directory. Set one up now?")?
+                    .then_some(init::Start::Confirmed)
+            } else {
+                match init::choose_from_manifests(&manifests, true)? {
+                    init::Choice::Start(start) => Some(start),
+                    init::Choice::Help => None,
+                    init::Choice::Cancel => return Ok(ExitCode::SUCCESS),
+                }
+            };
+            if let Some(start) = start {
+                if let Some(name) = Box::pin(init::run(home, client, start)).await?
                     && prompt::confirm(&format!("Open a session on {name} now?"))?
                 {
                     attach_new_session(home, client, &name).await?;
@@ -650,7 +661,7 @@ async fn agents_here_menu(home: &ControlPlaneHome, client: &Client, lines: &[&st
     match prompt::choose_lines(lines, &options, Some(0))? {
         Some(0) => tui::run(home, client).await.map(Some),
         Some(1) => {
-            if let Some(name) = Box::pin(init::run(home, client, true)).await?
+            if let Some(name) = Box::pin(init::run(home, client, init::Start::New)).await?
                 && prompt::confirm(&format!("Open a session on {name} now?"))?
             {
                 attach_new_session(home, client, &name).await?;
@@ -659,25 +670,6 @@ async fn agents_here_menu(home: &ControlPlaneHome, client: &Client, lines: &[&st
         }
         _ => Ok(None),
     }
-}
-
-/// What to ask when the current directory has no agent: to create one from the manifest already
-/// here, or to set one up from scratch.
-fn set_up_question() -> String {
-    let manifest = std::env::current_dir()
-        .ok()
-        .map(|directory| tui::working_tree_manifests(&directory))
-        .and_then(|manifests| manifests.into_iter().next());
-    manifest.map_or_else(
-        || "No agent was set up for this directory. Set one up now?".to_owned(),
-        |manifest| {
-            let name = manifest.file_name().map_or_else(
-                || manifest.display().to_string(),
-                |name| name.to_string_lossy().into_owned(),
-            );
-            format!("{name} is here, but no agent runs from it. Create one now?")
-        },
-    )
 }
 
 /// Offers `agentctl init` before a command that would use the current directory's Agent finds
@@ -693,11 +685,16 @@ async fn offer_init_if_missing(
         return Ok(None);
     }
     let directory = std::env::current_dir().map_err(Error::from)?;
-    if let Err(Error::Rpc(error)) = client.resolve_agent_variant(directory, None).await
+    if let Err(Error::Rpc(error)) = client.resolve_agent_variant(directory.clone(), None).await
         && error.is_not_found()
-        && prompt::confirm(&set_up_question())?
     {
-        return Box::pin(init::run(home, client, true)).await;
+        // With agents set up here, init's own menu offers them or a new one, and can be cancelled.
+        if !tui::working_tree_manifests(&directory).is_empty() {
+            return Box::pin(init::run(home, client, init::Start::Ask)).await;
+        }
+        if prompt::confirm("No agent was set up for this directory. Set one up now?")? {
+            return Box::pin(init::run(home, client, init::Start::Confirmed)).await;
+        }
     }
     Ok(None)
 }
@@ -770,7 +767,7 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
             command: GithubCommand::Reset { yes },
         } => github::reset(client, yes).await?,
         Command::Init => {
-            if let Some(name) = Box::pin(init::run(home, client, false)).await?
+            if let Some(name) = Box::pin(init::run(home, client, init::Start::Ask)).await?
                 && prompt::confirm(&format!("Open a session on {name} now?"))?
             {
                 attach_new_session(home, client, &name).await?;

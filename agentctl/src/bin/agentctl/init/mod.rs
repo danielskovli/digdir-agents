@@ -17,15 +17,93 @@ mod toolchains;
 use image::Tier;
 use template::{Checkout, Choices, Github};
 
+/// What has been decided before `run` starts.
+#[derive(Clone, Debug)]
+pub(crate) enum Start {
+    /// Nothing: `agentctl init` was run.
+    Ask,
+    /// The person agreed to set up an agent here, so it is not asked again.
+    Confirmed,
+    /// Write a new agent directory, whatever is here already.
+    New,
+    /// Create the agent from this existing manifest.
+    From(PathBuf),
+    /// Choose one of the existing manifests in the TUI's create form.
+    Form,
+}
+
+/// What to do where agent manifests exist but no agent runs from them.
+#[derive(Clone, Debug)]
+pub(crate) enum Choice {
+    /// Go on with `run` from this start.
+    Start(Start),
+    /// Show agentctl's help instead.
+    Help,
+    /// Do nothing.
+    Cancel,
+}
+
+/// How many existing manifests the menu lists one by one before it offers the create form.
+const LISTED_MANIFESTS: usize = 4;
+
+/// Asks whether to create an agent from one of `manifests`, or set up a new one, and with `help`
+/// whether to show agentctl's help instead.
+pub(crate) fn choose_from_manifests(manifests: &[PathBuf], help: bool) -> Result<Choice, Error> {
+    let directory = std::env::current_dir().map_err(Error::from)?;
+    let root = crate::tui::repository_root(&directory)
+        .unwrap_or(&directory)
+        .to_path_buf();
+    let mut options = Vec::new();
+    let mut choices = Vec::new();
+    if manifests.len() <= LISTED_MANIFESTS {
+        for manifest in manifests {
+            options.push(format!("Create the agent in {}", manifest_label(&root, manifest)));
+            choices.push(Choice::Start(Start::From(manifest.clone())));
+        }
+    } else {
+        options.push(format!("Choose one of the {} agents set up here", manifests.len()));
+        choices.push(Choice::Start(Start::Form));
+    }
+    options.push("Set up a new agent".to_owned());
+    choices.push(Choice::Start(Start::New));
+    if help {
+        options.push("Show agentctl's help".to_owned());
+        choices.push(Choice::Help);
+    }
+    let question = if manifests.len() == 1 {
+        "An agent is set up here, but none runs. What would you like to do?"
+    } else {
+        "Agents are set up here, but none runs. What would you like to do?"
+    };
+    Ok(prompt::choose(question, &options, Some(0))?
+        .and_then(|index| choices.get(index).cloned())
+        .unwrap_or(Choice::Cancel))
+}
+
+/// A manifest as the menu names it: its directory below `root`, and the variant when it is one.
+fn manifest_label(root: &Path, manifest: &Path) -> String {
+    let directory = manifest.parent().unwrap_or(manifest);
+    let relative = directory.strip_prefix(root).unwrap_or(directory);
+    let place = if relative.as_os_str().is_empty() {
+        "this directory".to_owned()
+    } else {
+        relative.display().to_string()
+    };
+    match manifest.file_name().and_then(|name| name.to_str()) {
+        Some(agent::manifest::MANIFEST_FILE) | None => place,
+        Some(file) => format!("{place} ({file})"),
+    }
+}
+
 /// Sets up an Agent for the current directory, returning its name once it is Ready, or `None`
-/// when the user declined a step. With an agent here already, it sets up another one in a new
-/// directory. `confirmed` says the person already agreed to set one up, so it is not asked again.
+/// when the person declined a step. Where an agent exists already it sets up another one in a new
+/// directory; where manifests exist but no agent runs, it offers to create one from them.
 ///
 /// # Errors
 ///
 /// Returns an error when there is no terminal to ask on, a login or apply fails, or the Agent
 /// does not become Ready.
-pub(crate) async fn run(home: &ControlPlaneHome, client: &Client, confirmed: bool) -> CommandResult<Option<String>> {
+pub(crate) async fn run(home: &ControlPlaneHome, client: &Client, start: Start) -> CommandResult<Option<String>> {
     if !prompt::interactive() {
         return Err(Error::Invalid("agentctl init needs an interactive terminal".into()).into());
     }
@@ -36,8 +114,9 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client, confirmed: boo
         Err(Error::Rpc(error)) if error.is_not_found() => None,
         Err(_) => Some(None),
     };
+    let mut start = start;
     if let Some(agent) = &existing
-        && !confirmed
+        && matches!(start, Start::Ask)
     {
         let here = agent.as_ref().map_or_else(
             || "This directory already has agents.".to_owned(),
@@ -45,6 +124,16 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client, confirmed: boo
         );
         if !prompt::confirm_lines(&[&here, "Set up another one?"])? {
             return Ok(None);
+        }
+        start = Start::New;
+    }
+    if existing.is_none() && matches!(start, Start::Ask | Start::Confirmed) {
+        let manifests = crate::tui::working_tree_manifests(&directory);
+        if !manifests.is_empty() {
+            start = match choose_from_manifests(&manifests, false)? {
+                Choice::Start(chosen) => chosen,
+                Choice::Help | Choice::Cancel => return Ok(None),
+            };
         }
     }
     let mut status = client.auth_status().await?;
@@ -54,27 +143,24 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client, confirmed: boo
         }
         status = client.auth_status().await?;
     }
-    let github = github_account(client, &status).await;
-    let name = if existing.is_some() || crate::tui::working_tree_manifests(&directory).is_empty() {
-        let asked = confirmed || existing.is_some();
-        let Some(manifest) = write_agent_directory(home, &directory, &github, &status, asked)? else {
-            return Ok(None);
-        };
-        create_written(client, &manifest).await?
-    } else {
-        let manifests = crate::tui::working_tree_manifests(&directory);
-        if let [manifest] = manifests.as_slice() {
-            create_from(client, manifest).await?
-        } else {
+    let name = match start {
+        Start::From(manifest) => create_written(client, &manifest).await?,
+        Start::Form => {
             eprintln!();
-            eprintln!(
-                "This repository has several agent manifests. Choose one, and a name, in the form that opens next."
-            );
+            eprintln!("Choose one of the agents set up here, and a name, in the form that opens next.");
             prompt::wait_for_enter("Press Enter to open it…")?;
             let Some(name) = crate::tui::create_agent_here(home, client).await? else {
                 return Ok(None);
             };
             name
+        }
+        Start::Ask | Start::Confirmed | Start::New => {
+            let github = github_account(client, &status).await;
+            let asked = !matches!(start, Start::Ask);
+            let Some(manifest) = write_agent_directory(home, &directory, &github, &status, asked)? else {
+                return Ok(None);
+            };
+            create_written(client, &manifest).await?
         }
     };
     crate::wait_until_converged(client, &name, std::time::Duration::from_mins(10)).await?;
@@ -449,7 +535,7 @@ async fn offer_github_login(client: &Client, reason: Option<&str>) -> Github {
     }
 }
 
-/// Creates the agent from a manifest `init` just wrote, under its own name, or the first free
+/// Creates the agent from `manifest` under its own name, or the first free
 /// numbered one when an agent already has it.
 async fn create_written(client: &Client, manifest: &Path) -> CommandResult<String> {
     let manifest_name = agent::manifest::resolve(manifest)?.agent.metadata.name;
@@ -463,33 +549,6 @@ async fn create_written(client: &Client, manifest: &Path) -> CommandResult<Strin
     };
     crate::tui::create_agent(client, manifest.to_path_buf(), name.clone(), None).await?;
     Ok(name)
-}
-
-/// Creates the agent from the repository's only manifest, asking for its name with the manifest's
-/// own as the suggestion, or the first free numbered one when an agent already has it.
-async fn create_from(client: &Client, manifest: &Path) -> CommandResult<String> {
-    let manifest_name = agent::manifest::resolve(manifest)?.agent.metadata.name;
-    let agents = client.list_agents().await?;
-    let taken = |name: &str| agents.iter().any(|agent| agent.metadata.name == name);
-    let suggestion = if taken(&manifest_name) {
-        crate::tui::numbered_name(&manifest_name, &agents)
-    } else {
-        manifest_name
-    };
-    loop {
-        let answer = prompt::ask(&format!("Name of the agent [{suggestion}]"))?;
-        let name = if answer.is_empty() { suggestion.clone() } else { answer };
-        if let Err(invalid) = ::sandbox::SandboxName::new(name.clone()) {
-            eprintln!("{name:?} cannot name an agent: {invalid}.");
-            continue;
-        }
-        if taken(&name) {
-            eprintln!("An agent named {name} already exists.");
-            continue;
-        }
-        crate::tui::create_agent(client, manifest.to_path_buf(), name.clone(), None).await?;
-        return Ok(name);
-    }
 }
 
 /// Offers the Claude Code login, then the Codex one, returning whether either was stored.
@@ -553,6 +612,17 @@ mod tests {
         assert_eq!(agent_name(Path::new("/src/_hidden_")), "hidden");
         assert_eq!(agent_name(Path::new("/")), "agent");
         assert_eq!(agent_name(Path::new("/src/---")), "agent");
+    }
+
+    #[test]
+    fn the_menu_names_a_manifest_by_its_directory_and_variant() {
+        let root = Path::new("/src/app");
+        assert_eq!(manifest_label(root, &root.join("agents/dev/agent.yaml")), "agents/dev");
+        assert_eq!(
+            manifest_label(root, &root.join("agents/dev/agent.worktree.yaml")),
+            "agents/dev (agent.worktree.yaml)"
+        );
+        assert_eq!(manifest_label(root, &root.join("agent.yaml")), "this directory");
     }
 
     #[test]
