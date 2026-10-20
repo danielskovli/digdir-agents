@@ -176,13 +176,18 @@ async fn attempt(client: &Client, source: Source, owner: Option<String>) -> Comm
 /// # Errors
 ///
 /// Returns an error when there is no terminal to choose or confirm on, or the daemon fails.
-pub(crate) async fn logout(client: &Client, target: Option<Logout>, yes: bool) -> CommandResult<()> {
+pub(crate) async fn logout(client: &Client, target: Option<Target>, yes: bool) -> CommandResult<()> {
     let tokens = client.auth_status().await?.github;
     if tokens.is_empty() {
         println!("No GitHub tokens are stored.");
         return Ok(());
     }
     if let Some(target) = target {
+        let target = match target {
+            Target::Every => Logout::Everywhere,
+            Target::Owner(owner) => Logout::Owner(owner),
+            Target::Named(name) => named(&tokens, &name)?,
+        };
         return forget(client, &tokens, target, yes, "Log out").await;
     }
     if !prompt::interactive() {
@@ -195,6 +200,46 @@ pub(crate) async fn logout(client: &Client, target: Option<Logout>, yes: bool) -
         return Ok(());
     };
     forget(client, &tokens, choices[index].1.clone(), yes, "Log out").await
+}
+
+/// Which token `agentctl github logout` was told to forget.
+#[derive(Clone, Debug)]
+pub(crate) enum Target {
+    /// Every stored token.
+    Every,
+    /// The token for this owner.
+    Owner(String),
+    /// The token whose owner, or else whose account, this is, as `agentctl github list` shows.
+    Named(String),
+}
+
+/// The stored token `name` picks: the one for that owner, else the only one acting as that
+/// account.
+fn named(tokens: &[GithubToken], name: &str) -> Result<Logout, Error> {
+    let lowered = name.to_ascii_lowercase();
+    if tokens
+        .iter()
+        .any(|token| token.owner.as_deref() == Some(lowered.as_str()))
+    {
+        return Ok(Logout::Owner(lowered));
+    }
+    let acting: Vec<&GithubToken> = tokens
+        .iter()
+        .filter(|token| token.account.login.eq_ignore_ascii_case(name))
+        .collect();
+    match acting.as_slice() {
+        [token] => Ok(token.owner.clone().map_or(Logout::AnyOther, Logout::Owner)),
+        [] => Err(Error::Invalid(format!(
+            "no stored GitHub token is for or acts as {name}; `agentctl github list` shows them"
+        ))),
+        several => {
+            let owners: Vec<&str> = several.iter().map(|token| token.scope()).collect();
+            Err(Error::Invalid(format!(
+                "{name} acts for several owners ({}); pass `--owner` to pick one",
+                owners.join(", ")
+            )))
+        }
+    }
 }
 
 /// Forgets every stored token, after a warning.
@@ -752,5 +797,21 @@ mod tests {
         );
         let missing = owner_warning("nobody", None, "danielskovli", fine).expect("warned");
         assert!(missing.contains("no user or organization named nobody"), "{missing}");
+    }
+
+    #[test]
+    fn logout_names_a_token_by_its_owner_or_its_account() {
+        let tokens = [
+            token(Some("digdir"), "digdir-agent"),
+            token(Some("altinn"), "shared-bot"),
+            token(Some("ssb"), "shared-bot"),
+            token(None, "danielskovli-agent"),
+        ];
+        assert!(matches!(named(&tokens, "Digdir"), Ok(Logout::Owner(owner)) if owner == "digdir"));
+        assert!(matches!(named(&tokens, "digdir-agent"), Ok(Logout::Owner(owner)) if owner == "digdir"));
+        assert!(matches!(named(&tokens, "danielskovli-agent"), Ok(Logout::AnyOther)));
+        let several = named(&tokens, "shared-bot").expect_err("acts for two owners");
+        assert!(several.to_string().contains("altinn, ssb"), "{several}");
+        named(&tokens, "nobody").expect_err("no such token");
     }
 }

@@ -516,11 +516,15 @@ enum GithubCommand {
     },
     /// List the stored tokens: owner, account, kind and expiry.
     List,
-    /// Forget a stored token, chosen from a list, or every one.
+    /// Forget a stored token, named by its owner or account or chosen from a list, or every one.
     ///
     /// Agents lose GitHub access on their next pass. The token stays valid on GitHub until you
     /// revoke it there.
     Logout {
+        /// The token to forget, by its owner or the account it acts as, as `agentctl github list`
+        /// shows them.
+        #[arg(conflicts_with_all = ["owner", "everywhere"])]
+        name: Option<String>,
         /// Forget the token for this user or organization, without asking which.
         #[arg(long, value_parser = parse_github_owner, conflicts_with = "everywhere")]
         owner: Option<String>,
@@ -745,12 +749,20 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
             command: GithubCommand::List,
         } => github::list(client).await?,
         Command::Github {
-            command: GithubCommand::Logout { owner, everywhere, yes },
+            command:
+                GithubCommand::Logout {
+                    name,
+                    owner,
+                    everywhere,
+                    yes,
+                },
         } => {
             let target = if everywhere {
-                Some(agent::github::Logout::Everywhere)
+                Some(github::Target::Every)
+            } else if let Some(owner) = owner {
+                Some(github::Target::Owner(owner))
             } else {
-                owner.map(agent::github::Logout::Owner)
+                name.map(github::Target::Named)
             };
             github::logout(client, target, yes).await?;
         }
@@ -2405,6 +2417,7 @@ mod tests {
                 .command,
             Some(Command::Github {
                 command: GithubCommand::Logout {
+                    name: None,
                     owner: None,
                     everywhere: false,
                     yes: false
