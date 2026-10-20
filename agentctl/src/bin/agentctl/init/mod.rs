@@ -156,7 +156,7 @@ fn write_agent_directory(
     };
     let editable = [manifest.as_path(), dockerfile.as_path(), instructions.as_path()];
     if prompt::confirm_lines(&[
-        "The image, resources, mounts and access cannot change once the agent exists.",
+        "Changing the image or mounts later means creating the agent again, which starts its disk over.",
         "Edit agent.yaml, the Dockerfile and instructions.md before creating the agent?",
     ])? && !edit_manifest(&chosen, &editable)?
     {

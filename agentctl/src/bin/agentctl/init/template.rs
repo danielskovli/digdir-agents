@@ -99,8 +99,9 @@ pub(super) fn manifest(choices: &Choices, status: &AuthenticationStatus) -> Stri
         disk_gib,
     } = size;
     format!(
-        "# Created by `agentctl init`. Change it and run `agentctl apply` to update the agent. The image,
-# resources, mounts and access cannot change once the agent exists: delete it and create it again.
+        "# Created by `agentctl init`. Change it and run `agentctl apply` to update the agent. The image
+# (including the Dockerfile's contents), mounts and harness types stay as the agent was created: to
+# change them, delete the agent and create it again, which starts its disk over.
 {about}apiVersion: agents.platform/v1alpha1
 kind: Agent
 metadata:

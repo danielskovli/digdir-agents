@@ -34,8 +34,10 @@ Update an installation with `agentctl self update`.
 Then, in any repository, run `agentctl init`. It offers the Claude Code or Codex login when neither is stored, and the
 GitHub account login when none is, writes an agent directory when the checkout has no manifest, and creates the Agent.
 Once the Agent is Ready it offers to open a Session. Before creating the agent it offers to open the written files in
-`$VISUAL` or `$EDITOR`, since the image,
-resources, mounts and access cannot change once the agent exists. `agentctl status` shows agentd, the stored logins
+`$VISUAL` or `$EDITOR`, since the image
+(including the Dockerfile's contents) and mounts stay as the agent was created; changing them means deleting it and
+creating it again, which starts its disk over. Resources, access, accounts, environment and secrets change with
+`agentctl apply`. `agentctl status` shows agentd, the stored logins
 and the current directory's agent at a glance, and `agentctl claude status` and `agentctl codex status` exit with 1
 when that login is missing.
 
