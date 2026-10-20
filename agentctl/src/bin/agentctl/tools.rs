@@ -39,9 +39,12 @@ pub(crate) struct Tools {
     /// Podman, with `docker` and `docker compose` working through it.
     #[serde(default)]
     pub(crate) containers: bool,
-    /// Chromium with playwright-cli, which comes with the desktop base image.
+    /// Chromium with playwright-cli, the base image's browser feature.
     #[serde(default)]
     pub(crate) browser: bool,
+    /// A desktop with VNC access, the base image's desktop feature, which brings the browser.
+    #[serde(default)]
+    pub(crate) desktop: bool,
     #[serde(default)]
     pub(crate) toolchains: Toolchains,
     /// Ubuntu packages.
@@ -86,7 +89,7 @@ pub(crate) struct Toolchains {
 impl Tools {
     /// The tools a new agent starts with: what the repository's files ask for, and what the
     /// person chose the agent to do.
-    pub(crate) fn from_detected(detected: &[Toolchain], containers: bool, browser: bool) -> Self {
+    pub(crate) fn from_detected(detected: &[Toolchain], containers: bool, browser: bool, desktop: bool) -> Self {
         let mut toolchains = Toolchains::default();
         for toolchain in detected {
             match toolchain {
@@ -113,6 +116,7 @@ impl Tools {
         Self {
             containers,
             browser,
+            desktop,
             toolchains,
             packages: Vec::new(),
             npm: Vec::new(),
@@ -204,7 +208,8 @@ impl Tools {
         };
         vec![
             format!("Containers  {}", yes(self.containers)),
-            format!("Browser     {}", yes(self.browser)),
+            format!("Browser     {}", yes(self.browser || self.desktop)),
+            format!("Desktop     {}", yes(self.desktop)),
             format!("Toolchains  {}", list(&toolchains)),
             format!("Packages    {}", list(&self.packages)),
             format!("npm         {}", list(&self.npm)),
@@ -266,6 +271,9 @@ impl Tools {
 containers: {containers}
 # Chromium with playwright-cli, for testing web apps.
 browser: {browser}
+# A desktop you can watch and take over over VNC; it brings the browser, and agent.yaml's access
+# needs `- type: vnc` to open it.
+desktop: {desktop}
 # Language toolchains: node (a version), corepack, dotnet (\"lts\" or an SDK version), go (\"latest\"
 # or a version), rust (\"stable\" or a channel), python, java and maven.
 {toolchains}# Ubuntu packages, such as postgresql-client.
@@ -273,6 +281,7 @@ packages:{packages}# Global npm packages, such as pnpm.
 npm:{npm}",
             containers = self.containers,
             browser = self.browser,
+            desktop = self.desktop,
             packages = list(&self.packages),
             npm = list(&self.npm),
         )
@@ -306,9 +315,17 @@ npm:{npm}",
                 self.npm.join(" ")
             )
         };
+        // The base image's own features go after the repository's tools, as its README advises.
+        let features = if self.desktop {
+            format!("\n{}", image::DESKTOP)
+        } else if self.browser {
+            format!("\n{}", image::BROWSER)
+        } else {
+            String::new()
+        };
         format!(
-            "{BEGIN}\nFROM {base}\n\nUSER root\nARG TARGETARCH\n{containers}{toolchains}{packages}{npm}{END}\n",
-            base = image::base_image(self.browser)
+            "{BEGIN}\nFROM {base}\n\nUSER root\nARG TARGETARCH\n{containers}{toolchains}{packages}{npm}{features}{END}\n",
+            base = image::BASE_IMAGE
         )
     }
 
@@ -326,6 +343,10 @@ npm:{npm}",
             "browser" | "chromium" | "playwright" => {
                 self.browser = true;
                 "a browser".to_owned()
+            }
+            "desktop" | "vnc" => {
+                self.desktop = true;
+                "a desktop".to_owned()
             }
             "node" | "nodejs" => {
                 chains.node = version;
@@ -387,6 +408,7 @@ npm:{npm}",
         match name {
             "containers" | "docker" | "podman" => taken(&mut self.containers).then(|| "containers".to_owned()),
             "browser" | "chromium" | "playwright" => taken(&mut self.browser).then(|| "the browser".to_owned()),
+            "desktop" | "vnc" => taken(&mut self.desktop).then(|| "the desktop".to_owned()),
             "node" | "nodejs" => chains.node.take().map(|_| "the Node.js version".to_owned()),
             "corepack" => taken(&mut chains.corepack).then(|| "Corepack".to_owned()),
             "dotnet" | ".net" => chains.dotnet.take().map(|_| ".NET".to_owned()),
@@ -668,6 +690,7 @@ mod tests {
             ],
             true,
             false,
+            false,
         )
     }
 
@@ -690,7 +713,7 @@ mod tests {
         let block = tools.block();
         assert!(block.starts_with(BEGIN) && block.trim_end().ends_with(END), "{block}");
         for expected in [
-            "FROM ghcr.io/digdir/agentctl-base:ubuntu-26.04\n",
+            "FROM ghcr.io/digdir/agentctl-base:ubuntu-26.04@sha256:",
             "podman-docker",
             "corepack enable",
             "ARG GO_VERSION=1.26",
@@ -699,11 +722,19 @@ mod tests {
         ] {
             assert!(block.contains(expected), "{expected} in {block}");
         }
+        assert!(!block.contains("agent-feature"), "no browser asked for");
         tools.browser = true;
+        let browser = tools.block();
         assert!(
-            tools
-                .block()
-                .contains("FROM ghcr.io/digdir/agentctl-base:ubuntu-26.04-desktop\n")
+            browser.contains("RUN agent-feature install browser\nENV NODE_PATH="),
+            "{browser}"
+        );
+        tools.desktop = true;
+        let desktop = tools.block();
+        assert!(desktop.contains("RUN agent-feature install desktop\n"), "{desktop}");
+        assert!(
+            desktop.contains("ENV DISPLAY=:1") && !desktop.contains("install browser"),
+            "{desktop}"
         );
     }
 

@@ -742,11 +742,11 @@ mod tests {
             Toolchain::Java { maven: true },
         ];
         let written = dockerfile(
-            &crate::tools::Tools::from_detected(&detected, true, false),
+            &crate::tools::Tools::from_detected(&detected, true, false, false),
             &Checkout::Clone("digdir/worker".into()),
         );
         for expected in [
-            "\nFROM ghcr.io/digdir/agentctl-base:ubuntu-26.04\n" as &str,
+            "\nFROM ghcr.io/digdir/agentctl-base:ubuntu-26.04@sha256:" as &str,
             "podman-docker",
             "\nRUN agent-image-check\n",
             "RUN printf '%s\\n' 'digdir/worker' >/etc/agent-workspace.d/workspace.list\n",
@@ -767,17 +767,20 @@ mod tests {
             "{written}"
         );
 
-        let mounted = dockerfile(&crate::tools::Tools::from_detected(&[], false, false), &Checkout::Mount);
+        let mounted = dockerfile(
+            &crate::tools::Tools::from_detected(&[], false, false, false),
+            &Checkout::Mount,
+        );
         assert!(mounted.contains("# RUN printf"), "nothing is cloned: {mounted}");
         assert!(
             !mounted.contains("podman"),
             "no containers for a basic agent: {mounted}"
         );
-        let desktop = dockerfile(&crate::tools::Tools::from_detected(&[], true, true), &Checkout::Mount);
-        assert!(
-            desktop.contains("\nFROM ghcr.io/digdir/agentctl-base:ubuntu-26.04-desktop\n"),
-            "{desktop}"
+        let desktop = dockerfile(
+            &crate::tools::Tools::from_detected(&[], true, true, true),
+            &Checkout::Mount,
         );
+        assert!(desktop.contains("RUN agent-feature install desktop\n"), "{desktop}");
         assert!(!mounted.contains("NODE_RELEASE"), "{mounted}");
     }
 
@@ -799,7 +802,7 @@ mod tests {
             Toolchain::Java { maven: false },
         ];
         let written = dockerfile(
-            &crate::tools::Tools::from_detected(&all, true, true),
+            &crate::tools::Tools::from_detected(&all, true, true, true),
             &Checkout::Clone("digdir/worker".into()),
         );
         let mut continued = false;

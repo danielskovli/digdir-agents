@@ -217,7 +217,12 @@ fn write_agent_directory(
             template::worktree_variant(&choices),
         ));
     }
-    let tools = crate::tools::Tools::from_detected(&toolchains, tier.has_containers(), tier.has_browser());
+    let tools = crate::tools::Tools::from_detected(
+        &toolchains,
+        tier.has_containers(),
+        tier.has_browser(),
+        tier.has_desktop(),
+    );
     written.push((folder.join(crate::tools::TOOLS_FILE), tools.render()));
     written.push((
         folder.join(crate::tools::DOCKERFILE),
