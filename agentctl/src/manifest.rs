@@ -507,6 +507,23 @@ impl Spec {
         })
     }
 
+    fn validate_accounts(&self) -> Result<(), Error> {
+        let mut accounts = std::collections::HashSet::new();
+        if let Some(index) = self
+            .accounts
+            .iter()
+            .position(|account| !accounts.insert(std::mem::discriminant(account)))
+        {
+            return Err(Error::Invalid(format!("spec.accounts[{index}] duplicates an account")));
+        }
+        if let Some(owner) = self.github_owner().filter(|owner| !crate::github::valid_owner(owner)) {
+            return Err(Error::Invalid(format!(
+                "spec.accounts: {owner:?} is not a GitHub user or organization"
+            )));
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<(), Error> {
         let mut mount_targets = std::collections::BTreeSet::new();
         for (index, mount) in self.sandbox.mounts.iter().enumerate() {
@@ -593,19 +610,7 @@ impl Spec {
                 "spec.access[{index}] duplicates an access capability"
             )));
         }
-        let mut accounts = std::collections::HashSet::new();
-        if let Some(index) = self
-            .accounts
-            .iter()
-            .position(|account| !accounts.insert(std::mem::discriminant(account)))
-        {
-            return Err(Error::Invalid(format!("spec.accounts[{index}] duplicates an account")));
-        }
-        if let Some(owner) = self.github_owner().filter(|owner| !crate::github::valid_owner(owner)) {
-            return Err(Error::Invalid(format!(
-                "spec.accounts: {owner:?} is not a GitHub user or organization"
-            )));
-        }
+        self.validate_accounts()?;
         if self.network.deny.iter().any(|host| !valid_host_pattern(host)) {
             return Err(Error::Invalid(
                 "spec.network.deny contains an invalid host pattern".into(),

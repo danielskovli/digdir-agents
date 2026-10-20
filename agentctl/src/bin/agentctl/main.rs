@@ -1877,6 +1877,10 @@ async fn harness_status(client: &Client, harness: agent::Harness) -> CommandResu
     let (signed_in, label, command) = match harness {
         agent::Harness::ClaudeCode => (status.claude_code, "Claude Code", "claude"),
         agent::Harness::Codex => (status.codex, "Codex", "codex"),
+        agent::Harness::Pi => {
+            println!("Pi: configured by each agent; agentctl stores no login for it");
+            return Ok(ExitCode::SUCCESS);
+        }
     };
     if signed_in {
         println!("{label}: signed in; agents can use it");
@@ -1989,6 +1993,11 @@ async fn harness_login(
     let credential = match (from_stdin, harness) {
         (true, agent::Harness::ClaudeCode) => read_token_from_stdin()?,
         (true, agent::Harness::Codex) => read_stdin_to_end()?,
+        (true, agent::Harness::Pi) => {
+            return Err(
+                Error::Invalid("Pi is configured by each agent; agentctl stores no login for it".into()).into(),
+            );
+        }
         (false, harness) => agent::harness::acquire_host_credential(harness, home.path())?,
     };
     let imported = client.auth_login(harness, credential.to_string(), from_stdin).await?;
