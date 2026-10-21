@@ -19,6 +19,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 mod format;
 mod github;
+mod host;
 mod init;
 mod launch;
 mod progress;

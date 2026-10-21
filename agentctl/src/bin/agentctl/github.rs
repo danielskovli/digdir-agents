@@ -70,13 +70,23 @@ async fn sign_in(client: &Client, source: Source, owner: Option<String>) -> Comm
     }
 }
 
+/// Where to get the GitHub CLI, whose browser sign-in agentctl uses.
+const GH_CLI: &str = "https://cli.github.com";
+
 async fn attempt(client: &Client, source: Source, owner: Option<String>) -> CommandResult<Attempt> {
     let mut repository = current_repository();
     let interactive = source != Source::Stdin;
     let mut named_owner = owner.map(|owner| owner.to_ascii_lowercase());
     // Naming an owner asks for that owner's fine-grained token; otherwise the person chooses.
-    let source = if source == Source::Form && named_owner.is_none() && agent::github::gh_installed() {
-        choose_method()?
+    let source = if source == Source::Form && named_owner.is_none() {
+        if agent::github::gh_installed() {
+            choose_method()?
+        } else {
+            eprintln!(
+                "\nWith the GitHub CLI installed ({GH_CLI}), agentctl could also sign in with the browser instead."
+            );
+            source
+        }
     } else {
         source
     };
@@ -390,6 +400,9 @@ fn expiry(token: &GithubToken, now: time::OffsetDateTime) -> String {
 
 /// The GitHub repository of the current directory's `origin` remote, if it is on GitHub.
 pub(crate) fn current_repository() -> Option<Repository> {
+    if !crate::host::git_available() {
+        return None;
+    }
     let output = std::process::Command::new("git")
         .args(["remote", "-v"])
         .stdin(std::process::Stdio::null())

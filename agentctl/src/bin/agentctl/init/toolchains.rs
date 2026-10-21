@@ -1,8 +1,8 @@
 //! Which toolchains a repository needs, read from the files that declare them.
 //!
 //! A marker file anywhere in the repository's tracked files, up to [`MAX_DEPTH`] directories
-//! deep, selects a toolchain; versions come from the shallowest file that names one. Outside a
-//! Git repository only the directory itself is looked at.
+//! deep, selects a toolchain; versions come from the shallowest file that names one. Without Git,
+//! the directory's files that its ignore files do not exclude count instead.
 
 use std::path::{Path, PathBuf};
 
@@ -134,10 +134,19 @@ pub(super) fn detect(root: &Path) -> Vec<Toolchain> {
     toolchains
 }
 
-/// The repository's tracked files up to [`MAX_DEPTH`], shallowest first, relative to `root`; or
-/// the directory's own files when it is not a Git checkout.
+/// The repository's tracked and untracked but not ignored files up to [`MAX_DEPTH`], shallowest
+/// first, relative to `root`.
 fn candidate_files(root: &Path) -> Vec<PathBuf> {
-    let tracked = std::process::Command::new("git")
+    let mut files = git_files(root).unwrap_or_else(|| walked_files(root));
+    files.sort_by_key(|path| path.components().count());
+    files
+}
+
+fn git_files(root: &Path) -> Option<Vec<PathBuf>> {
+    if !crate::host::git_available() {
+        return None;
+    }
+    let output = std::process::Command::new("git")
         .arg("-C")
         .arg(root)
         .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
@@ -145,24 +154,31 @@ fn candidate_files(root: &Path) -> Vec<PathBuf> {
         .stderr(std::process::Stdio::null())
         .output()
         .ok()
-        .filter(|output| output.status.success());
-    let mut files: Vec<PathBuf> = match tracked {
-        Some(output) => output
+        .filter(|output| output.status.success())?;
+    Some(
+        output
             .stdout
             .split(|byte| *byte == 0)
             .filter(|path| !path.is_empty())
             .map(|path| PathBuf::from(String::from_utf8_lossy(path).into_owned()))
             .filter(|path| path.components().count() <= MAX_DEPTH + 1)
             .collect(),
-        None => std::fs::read_dir(root)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|entry| PathBuf::from(entry.file_name()))
-            .collect(),
-    };
-    files.sort_by_key(|path| path.components().count());
-    files
+    )
+}
+
+/// The files Git would list, read without Git: `.gitignore` and other ignore files apply.
+fn walked_files(root: &Path) -> Vec<PathBuf> {
+    ignore::WalkBuilder::new(root)
+        .max_depth(Some(MAX_DEPTH + 1))
+        .require_git(false)
+        .hidden(false)
+        .filter_entry(|entry| entry.file_name() != ".git")
+        .follow_links(false)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+        .filter_map(|entry| entry.path().strip_prefix(root).ok().map(Path::to_path_buf))
+        .collect()
 }
 
 /// `.nvmrc` and `.node-version`: a version such as `20`, `v20.11.1` or `20.11`; aliases such
@@ -348,12 +364,29 @@ mod tests {
     }
 
     #[test]
-    fn outside_git_only_the_directory_itself_is_read() {
+    fn outside_git_subdirectories_are_read_and_ignore_files_apply() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
-        std::fs::write(directory.path().join("go.mod"), "module x\n").expect("file");
-        std::fs::create_dir(directory.path().join("sub")).expect("directory");
-        std::fs::write(directory.path().join("sub").join("Cargo.toml"), "").expect("file");
-        assert_eq!(detect(directory.path()), [Toolchain::Go { version: None }]);
+        for (path, contents) in [
+            (".gitignore", "vendor/\n"),
+            (".git/HEAD", ""),
+            ("go.mod", "module x\n"),
+            ("sub/Cargo.toml", ""),
+            ("vendor/pom.xml", ""),
+        ] {
+            let path = directory.path().join(path);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("directories");
+            std::fs::write(path, contents).expect("file");
+        }
+        let mut files = walked_files(directory.path());
+        files.sort();
+        assert_eq!(
+            files,
+            [
+                PathBuf::from(".gitignore"),
+                "go.mod".into(),
+                PathBuf::from("sub").join("Cargo.toml")
+            ]
+        );
     }
 
     #[test]

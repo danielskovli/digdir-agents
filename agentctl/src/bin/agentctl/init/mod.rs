@@ -14,8 +14,14 @@ mod sizing;
 pub(crate) mod template;
 pub(crate) mod toolchains;
 
+use crate::host::Docker;
 use image::Tier;
 use template::{Checkout, Choices, Github};
+
+/// Where a newcomer gets Docker.
+const DOCKER_DESKTOP: &str = "https://docs.docker.com/get-started/get-docker/";
+/// How often the wizard looks again for Docker to start.
+const DOCKER_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// What has been decided before `run` starts.
 #[derive(Clone, Debug)]
@@ -136,6 +142,14 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client, start: Start) 
             };
         }
     }
+    if matches!(start, Start::Ask | Start::Confirmed | Start::New) {
+        if matches!(start, Start::Ask) && !prompt::confirm("No agent here. Set one up?")? {
+            return Ok(None);
+        }
+        if !docker_ready().await {
+            return Ok(None);
+        }
+    }
     let mut status = client.auth_status().await?;
     if !status.any_harness() {
         if !sign_in_to_a_harness(home, client).await? {
@@ -156,8 +170,7 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client, start: Start) 
         }
         Start::Ask | Start::Confirmed | Start::New => {
             let github = github_account(client, &status).await;
-            let asked = !matches!(start, Start::Ask);
-            let Some(manifest) = write_agent_directory(home, &directory, &github, &status, asked)? else {
+            let Some(manifest) = write_agent_directory(home, &directory, &github, &status)? else {
                 return Ok(None);
             };
             create_written(home, client, &manifest).await?
@@ -175,14 +188,10 @@ fn write_agent_directory(
     directory: &Path,
     github: &Github,
     status: &AuthenticationStatus,
-    confirmed: bool,
 ) -> Result<Option<PathBuf>, Error> {
     let root = crate::tui::repository_root(directory)
         .unwrap_or(directory)
         .to_path_buf();
-    if !confirmed && !prompt::confirm("No agent here. Set one up?")? {
-        return Ok(None);
-    }
     let repository = agent_name(&root);
     let (short_name, folder) = choose_short_name(&root, &repository)?;
     let name = qualified_name(&repository, &short_name);
@@ -255,12 +264,6 @@ fn write_agent_directory(
         "Edit agent.yaml, tools.yaml and instructions.md before creating the agent?",
     ])? && !edit_manifest(&chosen, &editable)?
     {
-        return Ok(None);
-    }
-    if !docker_running() {
-        eprintln!(
-            "\nDocker builds the agent's image, and it is not running here. Start Docker, then run `agentctl init` again."
-        );
         return Ok(None);
     }
     Ok(Some(chosen))
@@ -360,14 +363,25 @@ fn edit_manifest(manifest: &Path, files: &[&Path]) -> Result<bool, Error> {
     }
 }
 
-fn docker_running() -> bool {
-    std::process::Command::new("docker")
-        .args(["version", "--format", "{{.Server.Version}}"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+/// Whether Docker, which builds the agent's image, runs here; when it is installed but stopped,
+/// waits for it to start.
+async fn docker_ready() -> bool {
+    match crate::host::docker() {
+        Docker::Running => return true,
+        Docker::Missing => {
+            eprintln!("\nThe agent's image is built with Docker, which is not installed here.");
+            eprintln!("Install Docker Desktop from {DOCKER_DESKTOP}, then run agentctl again.");
+            return false;
+        }
+        Docker::Stopped => {}
+    }
+    eprintln!("\nThe agent's image is built with Docker, which is installed but not running.");
+    eprintln!("Start Docker, and setup continues once it runs. Press Ctrl-C to stop.");
+    while crate::host::docker() != Docker::Running {
+        tokio::time::sleep(DOCKER_POLL).await;
+    }
+    eprintln!("Docker is running.");
+    true
 }
 
 /// Asks what the agent should be able to do, which picks its image's stages.
@@ -396,6 +410,13 @@ fn choose_tier() -> Result<Tier, Error> {
 /// Only a repository on GitHub can be cloned.
 fn choose_checkout(root: &Path) -> Result<(Checkout, bool), Error> {
     let folder = home_relative(root);
+    if !crate::host::git_available() {
+        eprintln!(
+            "\nThe agent gets {folder} mounted. To offer a fresh clone instead, agentctl needs Git, which is not installed here. {}.",
+            crate::host::git_install_hint()
+        );
+        return Ok((Checkout::Mount, false));
+    }
     let Some(remote) = remote(root) else {
         eprintln!("\nThe agent gets {folder} mounted, since there's no GitHub repository to clone.");
         return Ok((Checkout::Mount, false));

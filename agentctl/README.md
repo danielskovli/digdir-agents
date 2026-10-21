@@ -59,8 +59,8 @@ altinn-studio:
 what the manifest gives it: writing code (nothing more), also building and running containers (Podman, the default),
 also testing web apps in a browser (the base image's `browser` feature), or also a desktop that `agentctl vnc` opens
 (its `desktop` feature, with `access: vnc`). A fresh clone is offered for repositories on GitHub, which the base images clone at boot. The
-repository's own skills under `.claude/skills` are listed in the manifest, so every harness gets them. Without Docker,
-`init` writes the files and asks for Docker to be started before it creates the agent. The proposed size fits this machine:
+repository's own skills under `.claude/skills` are listed in the manifest, so every harness gets them. `init` checks
+for Docker before its first question and waits for it to start, and without Git it works on the mounted folder. The proposed size fits this machine:
 up to 4 CPUs, 8 GiB of memory and a disk of at most half the free space on the volume holding `~/.agent`, since an
 agent's disk takes host space as the agent writes, up to its size. `agentctl tools` shows the current directory's agent's tools; `agentctl tools add postgresql-client`, `go@1.26` or
 `npm:pnpm` and `agentctl tools remove` change them. An agent keeps the image it was created with, so after a change
