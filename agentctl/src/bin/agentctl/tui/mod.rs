@@ -316,6 +316,18 @@ async fn drive(home: &ControlPlaneHome, client: &Client, mode: Mode) -> CommandR
                     app.error = Some(error.to_string());
                 }
             }
+            Action::StopAll { agents } => {
+                let failed: Vec<String> =
+                    futures_util::future::join_all(agents.iter().map(|agent| client.stop_now(agent)))
+                        .await
+                        .into_iter()
+                        .zip(&agents)
+                        .filter_map(|(stopped, agent)| stopped.err().map(|error| format!("{agent}: {error}")))
+                        .collect();
+                if !failed.is_empty() {
+                    app.error = Some(format!("Some agents did not stop:\n{}", failed.join("\n")));
+                }
+            }
             Action::SetRunState { agent, state } => {
                 if let Err(error) = client.set_run_state(&agent, state).await {
                     app.error = Some(error.to_string());
