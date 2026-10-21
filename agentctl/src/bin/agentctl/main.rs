@@ -47,10 +47,55 @@ struct Arguments {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Manage the Agent CLI installation.
-    Self_ {
+    /// Set up an agent for the current directory, signing in and writing a manifest as needed.
+    Init,
+    /// Show agentd, the stored logins and the current directory's agent at a glance.
+    Status,
+    /// Open the interactive terminal UI.
+    Tui,
+    /// Create or attach to a named session in an agent sandbox.
+    Attach {
+        /// Session resource, optionally combined with its name (for example `session/s1`).
+        resource: String,
+        /// Optional session name when it is not part of `resource`.
+        name: Option<String>,
+        /// Owning agent; inferred from the current directory when omitted.
+        #[arg(long, conflicts_with = "variant")]
+        agent: Option<String>,
+        /// Select the closest agent by its applied leaf variant.
+        #[arg(long, value_parser = parse_variant_name, conflicts_with = "agent")]
+        variant: Option<AgentVariantName>,
+        #[command(flatten)]
+        selection: SessionSelection,
+    },
+    /// Stop an agent, or every agent, keeping their disks, so attaching to a session after a start resumes it.
+    ///
+    /// Running harnesses are stopped with the VM. Applying the manifest again keeps the agent stopped.
+    /// Without an agent, asks whether to stop every running agent; `--all --now` does so at once.
+    Stop {
+        #[command(flatten)]
+        target: StopTarget,
+    },
+    /// Start a stopped agent's Sandbox VM on its kept disk and wait until the agent is Ready.
+    Start {
+        #[command(flatten)]
+        target: RunStateTarget,
+    },
+    /// Show the tools an agent's image installs, from its folder's tools.yaml, and change them.
+    ///
+    /// The current directory's agent, or the one `--agent` names. After a change, it offers to
+    /// recreate the agent with the new tools.
+    Tools {
+        /// The agent whose tools to show or change.
+        #[arg(long, global = true)]
+        agent: Option<String>,
         #[command(subcommand)]
-        command: self_update::SelfCommand,
+        command: Option<ToolsCommand>,
+    },
+    /// Manage the GitHub tokens agents act as.
+    Github {
+        #[command(subcommand)]
+        command: GithubCommand,
     },
     /// Manage Claude Code harness authentication.
     Claude {
@@ -62,10 +107,79 @@ enum Command {
         #[command(subcommand)]
         command: CodexCommand,
     },
-    /// Manage the GitHub tokens agents act as.
-    Github {
+    /// Manage the instructions every agent on this host receives, ahead of its own.
+    Instructions {
         #[command(subcommand)]
-        command: GithubCommand,
+        command: InstructionsCommand,
+    },
+    /// Execute a command in an agent sandbox.
+    Exec {
+        /// Pass stdin to an allocated terminal.
+        #[arg(short = 'i', long, requires = "tty")]
+        stdin: bool,
+        /// Allocate a terminal; currently used together with --stdin.
+        #[arg(short = 't', long, requires = "stdin")]
+        tty: bool,
+        /// Agent resource or name; inferred from the current directory when omitted.
+        resource: Option<String>,
+        /// Agent name, as an alternative to the positional resource.
+        #[arg(long, conflicts_with_all = ["resource", "variant"])]
+        agent: Option<String>,
+        /// Select the closest agent by its applied leaf variant.
+        #[arg(long, value_parser = parse_variant_name, conflicts_with_all = ["agent", "resource"])]
+        variant: Option<AgentVariantName>,
+        /// Command and arguments to execute after `--`.
+        #[arg(last = true, required = true, num_args = 1..)]
+        command: Vec<String>,
+    },
+    /// Open an OpenSSH session to an agent through `agentctl ssh-proxy`.
+    Ssh {
+        /// Agent name, as an alternative to the positional resource.
+        #[arg(long, conflicts_with_all = ["resource", "variant"])]
+        agent: Option<String>,
+        /// Select the closest agent by its applied leaf variant.
+        #[arg(long, value_parser = parse_variant_name, conflicts_with_all = ["agent", "resource"])]
+        variant: Option<AgentVariantName>,
+        /// Agent resource or name; inferred from the current directory when omitted.
+        resource: Option<String>,
+        /// Remote command and arguments after `--`; an interactive shell when omitted.
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+    /// Forward an agent's desktop to a local VNC port until interrupted.
+    Vnc {
+        /// Agent name, as an alternative to the positional resource.
+        #[arg(long, conflicts_with_all = ["resource", "variant"])]
+        agent: Option<String>,
+        /// Select the closest agent by its applied leaf variant.
+        #[arg(long, value_parser = parse_variant_name, conflicts_with_all = ["agent", "resource"])]
+        variant: Option<AgentVariantName>,
+        /// Agent resource or name; inferred from the current directory when omitted.
+        resource: Option<String>,
+        /// Local port to listen on. Defaults to a free port, which is printed.
+        #[arg(long)]
+        port: Option<u16>,
+        /// Forward the browser-based viewer instead of the raw RFB port, so no VNC client is needed.
+        #[arg(long)]
+        web: bool,
+        /// Hand the address to the local browser or VNC handler instead of only printing it.
+        #[arg(long)]
+        open: bool,
+    },
+    /// Forward local ports to a running agent sandbox until interrupted.
+    PortForward {
+        /// Agent name, as an alternative to a leading agent argument.
+        #[arg(long, conflicts_with = "variant")]
+        agent: Option<String>,
+        /// Select the closest agent by its applied leaf variant.
+        #[arg(long, value_parser = parse_variant_name, conflicts_with = "agent")]
+        variant: Option<AgentVariantName>,
+        /// Optional leading agent resource or name, followed by port mappings
+        /// written as GUEST, LOCAL:GUEST, or ADDRESS:LOCAL:GUEST. An empty
+        /// local port (`:GUEST`) selects an ephemeral local port. The agent is
+        /// inferred from the current directory when no leading agent is given.
+        #[arg(required = true, num_args = 1..)]
+        arguments: Vec<String>,
     },
     /// Create a session and wait until its harness is ready, without attaching.
     Create {
@@ -96,28 +210,6 @@ enum Command {
         /// Print only the last N turns.
         #[arg(long)]
         last: Option<usize>,
-    },
-    /// Create or update an agent from a manifest.
-    Apply {
-        /// Agent manifest path; defaults to ./agent.yaml.
-        #[arg(short = 'f', long = "filename", conflicts_with = "variant")]
-        filename: Option<PathBuf>,
-        /// Variant of the agent in the current directory.
-        #[arg(long, value_parser = parse_variant_name, conflicts_with = "filename")]
-        variant: Option<AgentVariantName>,
-        /// Override metadata.name so one manifest can create multiple agents.
-        #[arg(long)]
-        name: Option<String>,
-        /// File supplying declared manifest environment and secret values; defaults to `.env`
-        /// beside the manifest. Keep files containing secrets outside bind-mounted directories.
-        #[arg(long)]
-        env_file: Option<PathBuf>,
-        /// Stay attached after applying and show provisioning progress until the agent is Ready.
-        #[arg(long)]
-        wait: bool,
-        /// Maximum wait with `--wait`, written as seconds, minutes, or hours (for example `10m`).
-        #[arg(long, default_value = "10m", value_parser = parse_duration, requires = "wait")]
-        timeout: Duration,
     },
     /// Display one or more resources.
     Get {
@@ -151,6 +243,28 @@ enum Command {
         #[arg(short = 'o', long, default_value = "table", value_enum)]
         output: OutputFormat,
     },
+    /// Create or update an agent from a manifest.
+    Apply {
+        /// Agent manifest path; defaults to ./agent.yaml.
+        #[arg(short = 'f', long = "filename", conflicts_with = "variant")]
+        filename: Option<PathBuf>,
+        /// Variant of the agent in the current directory.
+        #[arg(long, value_parser = parse_variant_name, conflicts_with = "filename")]
+        variant: Option<AgentVariantName>,
+        /// Override metadata.name so one manifest can create multiple agents.
+        #[arg(long)]
+        name: Option<String>,
+        /// File supplying declared manifest environment and secret values; defaults to `.env`
+        /// beside the manifest. Keep files containing secrets outside bind-mounted directories.
+        #[arg(long)]
+        env_file: Option<PathBuf>,
+        /// Stay attached after applying and show provisioning progress until the agent is Ready.
+        #[arg(long)]
+        wait: bool,
+        /// Maximum wait with `--wait`, written as seconds, minutes, or hours (for example `10m`).
+        #[arg(long, default_value = "10m", value_parser = parse_duration, requires = "wait")]
+        timeout: Duration,
+    },
     /// Request deletion of a resource.
     Delete {
         /// Resource kind, optionally combined with a name (for example `agent/worker`).
@@ -164,19 +278,6 @@ enum Command {
         #[arg(long, value_parser = parse_variant_name, conflicts_with = "agent")]
         variant: Option<AgentVariantName>,
     },
-    /// Stop an agent, or every agent, keeping their disks, so attaching to a session after a start resumes it.
-    ///
-    /// Running harnesses are stopped with the VM. Applying the manifest again keeps the agent stopped.
-    /// Without an agent, asks whether to stop every running agent; `--all --now` does so at once.
-    Stop {
-        #[command(flatten)]
-        target: StopTarget,
-    },
-    /// Start a stopped agent's Sandbox VM on its kept disk and wait until the agent is Ready.
-    Start {
-        #[command(flatten)]
-        target: RunStateTarget,
-    },
     /// Archive a session: stop its harness and hide it from listings, keeping its name and conversation.
     Archive {
         #[command(flatten)]
@@ -187,76 +288,18 @@ enum Command {
         #[command(flatten)]
         target: SessionTarget,
     },
-    /// Create or attach to a named session in an agent sandbox.
-    Attach {
-        /// Session resource, optionally combined with its name (for example `session/s1`).
+    /// Wait for a resource condition.
+    Wait {
+        /// Condition expression. Only `condition=Ready` is currently supported.
+        #[arg(long = "for", default_value = "condition=Ready")]
+        condition: String,
+        /// Maximum wait, written as seconds, minutes, or hours (for example `30s` or `10m`).
+        #[arg(long, default_value = "10m", value_parser = parse_duration)]
+        timeout: Duration,
+        /// Agent resource, optionally combined with its name (for example `agent/worker`).
         resource: String,
-        /// Optional session name when it is not part of `resource`.
+        /// Optional agent name when it is not part of `resource`.
         name: Option<String>,
-        /// Owning agent; inferred from the current directory when omitted.
-        #[arg(long, conflicts_with = "variant")]
-        agent: Option<String>,
-        /// Select the closest agent by its applied leaf variant.
-        #[arg(long, value_parser = parse_variant_name, conflicts_with = "agent")]
-        variant: Option<AgentVariantName>,
-        #[command(flatten)]
-        selection: SessionSelection,
-    },
-    /// Execute a command in an agent sandbox.
-    Exec {
-        /// Pass stdin to an allocated terminal.
-        #[arg(short = 'i', long, requires = "tty")]
-        stdin: bool,
-        /// Allocate a terminal; currently used together with --stdin.
-        #[arg(short = 't', long, requires = "stdin")]
-        tty: bool,
-        /// Agent resource or name; inferred from the current directory when omitted.
-        resource: Option<String>,
-        /// Agent name, as an alternative to the positional resource.
-        #[arg(long, conflicts_with_all = ["resource", "variant"])]
-        agent: Option<String>,
-        /// Select the closest agent by its applied leaf variant.
-        #[arg(long, value_parser = parse_variant_name, conflicts_with_all = ["agent", "resource"])]
-        variant: Option<AgentVariantName>,
-        /// Command and arguments to execute after `--`.
-        #[arg(last = true, required = true, num_args = 1..)]
-        command: Vec<String>,
-    },
-    /// Forward local ports to a running agent sandbox until interrupted.
-    PortForward {
-        /// Agent name, as an alternative to a leading agent argument.
-        #[arg(long, conflicts_with = "variant")]
-        agent: Option<String>,
-        /// Select the closest agent by its applied leaf variant.
-        #[arg(long, value_parser = parse_variant_name, conflicts_with = "agent")]
-        variant: Option<AgentVariantName>,
-        /// Optional leading agent resource or name, followed by port mappings
-        /// written as GUEST, LOCAL:GUEST, or ADDRESS:LOCAL:GUEST. An empty
-        /// local port (`:GUEST`) selects an ephemeral local port. The agent is
-        /// inferred from the current directory when no leading agent is given.
-        #[arg(required = true, num_args = 1..)]
-        arguments: Vec<String>,
-    },
-    /// Open an OpenSSH session to an agent through `agentctl ssh-proxy`.
-    Ssh {
-        /// Agent name, as an alternative to the positional resource.
-        #[arg(long, conflicts_with_all = ["resource", "variant"])]
-        agent: Option<String>,
-        /// Select the closest agent by its applied leaf variant.
-        #[arg(long, value_parser = parse_variant_name, conflicts_with_all = ["agent", "resource"])]
-        variant: Option<AgentVariantName>,
-        /// Agent resource or name; inferred from the current directory when omitted.
-        resource: Option<String>,
-        /// Remote command and arguments after `--`; an interactive shell when omitted.
-        #[arg(last = true)]
-        command: Vec<String>,
-    },
-    /// Relay one connection to an agent's SSH server over standard input and output.
-    ///
-    /// The generated OpenSSH client configuration runs this as its `ProxyCommand`.
-    SshProxy {
-        /// Agent resource or name.
-        resource: String,
     },
     /// Manage the OpenSSH client configuration for agents.
     SshConfig {
@@ -277,31 +320,6 @@ enum Command {
         #[arg(short = 'o', long, default_value = "table", value_enum)]
         output: OutputFormat,
     },
-    /// Forward an agent's desktop to a local VNC port until interrupted.
-    Vnc {
-        /// Agent name, as an alternative to the positional resource.
-        #[arg(long, conflicts_with_all = ["resource", "variant"])]
-        agent: Option<String>,
-        /// Select the closest agent by its applied leaf variant.
-        #[arg(long, value_parser = parse_variant_name, conflicts_with_all = ["agent", "resource"])]
-        variant: Option<AgentVariantName>,
-        /// Agent resource or name; inferred from the current directory when omitted.
-        resource: Option<String>,
-        /// Local port to listen on. Defaults to a free port, which is printed.
-        #[arg(long)]
-        port: Option<u16>,
-        /// Forward the browser-based viewer instead of the raw RFB port, so no VNC client is needed.
-        #[arg(long)]
-        web: bool,
-        /// Hand the address to the local browser or VNC handler instead of only printing it.
-        #[arg(long)]
-        open: bool,
-    },
-    /// Relay one connection to an agent's desktop over standard input and output.
-    VncProxy {
-        /// Agent resource or name.
-        resource: String,
-    },
     /// Describe how to reach an agent's desktop over VNC.
     VncInfo {
         /// Agent resource or name; inferred from the current directory when omitted.
@@ -316,40 +334,22 @@ enum Command {
         #[arg(short = 'o', long, default_value = "table", value_enum)]
         output: OutputFormat,
     },
-    /// Set up an agent for the current directory, signing in and writing a manifest as needed.
-    Init,
-    /// Show agentd, the stored logins and the current directory's agent at a glance.
-    Status,
-    /// Manage the instructions every agent on this host receives, ahead of its own.
-    Instructions {
+    /// Manage the Agent CLI installation.
+    Self_ {
         #[command(subcommand)]
-        command: InstructionsCommand,
+        command: self_update::SelfCommand,
     },
-    /// Show the tools an agent's image installs, from its folder's tools.yaml, and change them.
+    /// Relay one connection to an agent's SSH server over standard input and output.
     ///
-    /// The current directory's agent, or the one `--agent` names. After a change, it offers to
-    /// recreate the agent with the new tools.
-    Tools {
-        /// The agent whose tools to show or change.
-        #[arg(long, global = true)]
-        agent: Option<String>,
-        #[command(subcommand)]
-        command: Option<ToolsCommand>,
-    },
-    /// Open the interactive terminal UI.
-    Tui,
-    /// Wait for a resource condition.
-    Wait {
-        /// Condition expression. Only `condition=Ready` is currently supported.
-        #[arg(long = "for", default_value = "condition=Ready")]
-        condition: String,
-        /// Maximum wait, written as seconds, minutes, or hours (for example `30s` or `10m`).
-        #[arg(long, default_value = "10m", value_parser = parse_duration)]
-        timeout: Duration,
-        /// Agent resource, optionally combined with its name (for example `agent/worker`).
+    /// The generated OpenSSH client configuration runs this as its `ProxyCommand`.
+    SshProxy {
+        /// Agent resource or name.
         resource: String,
-        /// Optional agent name when it is not part of `resource`.
-        name: Option<String>,
+    },
+    /// Relay one connection to an agent's desktop over standard input and output.
+    VncProxy {
+        /// Agent resource or name.
+        resource: String,
     },
 }
 
