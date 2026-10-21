@@ -1369,8 +1369,13 @@ fn display_leaf(path: &Path) -> String {
     )
 }
 
+/// An error in the manifest at `path`, named by its file. A validation message is shown as it is;
+/// any other error says which form of the manifest, `context`, could not be read.
 fn manifest_error(path: &Path, context: &str, error: &Error) -> Error {
-    Error::Invalid(format!("{}: invalid {context}: {error}", display_leaf(path)))
+    match error {
+        Error::Invalid(message) => Error::Invalid(format!("{}: {message}", display_leaf(path))),
+        error => Error::Invalid(format!("{}: invalid {context}: {error}", display_leaf(path))),
+    }
 }
 
 fn with_chain(error: Error, chain: &[PathBuf]) -> Error {

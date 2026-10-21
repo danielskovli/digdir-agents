@@ -176,7 +176,7 @@ pub(crate) async fn run(home: &ControlPlaneHome, client: &Client, start: Start) 
             create_written(home, client, &manifest).await?
         }
     };
-    crate::wait_until_converged(client, &name, std::time::Duration::from_mins(10)).await?;
+    crate::wait_until_converged_simply(client, &name, std::time::Duration::from_mins(10)).await?;
     eprintln!("The agent {name} is ready.");
     Ok(Some(name))
 }
@@ -593,7 +593,7 @@ async fn sign_in_to_a_harness(home: &ControlPlaneHome, client: &Client) -> Comma
     let options = [
         "Claude Code".to_owned(),
         "Codex".to_owned(),
-        "Neither for now".to_owned(),
+        "Neither: stop setting up for now".to_owned(),
     ];
     let harness = match prompt::choose(
         "Neither Claude Code nor Codex is signed in on this host. Which should agents use?",
@@ -608,7 +608,9 @@ async fn sign_in_to_a_harness(home: &ControlPlaneHome, client: &Client) -> Comma
         crate::harness_login(home, client, harness, false).await?;
         return Ok(true);
     }
-    eprintln!("Sign in with `agentctl claude login` or `agentctl codex login`, then run `agentctl init` again.");
+    eprintln!(
+        "Agents need one of them to work. Sign in with `agentctl claude login` or `agentctl codex login`, then run `agentctl init` again."
+    );
     Ok(false)
 }
 

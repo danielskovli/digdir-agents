@@ -592,10 +592,7 @@ async fn target(client: &Client, agent: Option<&str>) -> CommandResult<(PathBuf,
     if directory.join(TOOLS_FILE).is_file() {
         return Ok((directory, None));
     }
-    Err(
-        Error::Invalid("no agent folder with a tools.yaml here; run this in an agent's folder, or pass --agent".into())
-            .into(),
-    )
+    Err(Error::Invalid("no agent here; `agentctl init` sets one up, or pass --agent NAME".into()).into())
 }
 
 /// `agentctl tools`: shows the tools, adds or removes some, and offers to recreate the agent
@@ -666,7 +663,7 @@ async fn recreate(home: &ControlPlaneHome, client: &Client, name: &str, manifest
         }
     }
     crate::tui::create_agent(home, client, manifest.to_path_buf(), name.to_owned(), None).await?;
-    crate::wait_until_converged(client, name, std::time::Duration::from_mins(15)).await?;
+    crate::wait_until_converged_simply(client, name, std::time::Duration::from_mins(15)).await?;
     eprintln!("{name} is ready with its new tools.");
     Ok(())
 }

@@ -35,7 +35,12 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::runtime::LocalRuntime;
 
 #[derive(Parser)]
-#[command(name = "agentctl", about = "Manage the per-user agent control plane", version = agent::build_version())]
+#[command(
+    name = "agentctl",
+    about = "Run coding agents in sandboxes on this machine",
+    after_help = "New here? Run `agentctl` in a repository: it sets up an agent and opens a session.\nTo stop every agent at once: agentctl stop --all --now",
+    version = agent::build_version()
+)]
 struct Arguments {
     /// Agent control-plane home.
     #[arg(long, global = true)]
@@ -47,16 +52,17 @@ struct Arguments {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Set up an agent for the current directory, signing in and writing a manifest as needed.
+    /// Set up an agent for this repository, signing in as needed.
     Init,
-    /// Show agentd, the stored logins and the current directory's agent at a glance.
+    /// Show the logins, agentd and this directory's agent, with what to do next.
     Status,
-    /// Open the interactive terminal UI.
+    /// Open the terminal UI with every agent and session.
     Tui,
-    /// Create or attach to a named session in an agent sandbox.
+    /// Open a session on this directory's agent: its only one, a new one, or one by name.
     Attach {
-        /// Session resource, optionally combined with its name (for example `session/s1`).
-        resource: String,
+        /// Session resource, optionally combined with its name (for example `session/s1`); without
+        /// one, the current directory's agent's only session, a new one, or one you choose.
+        resource: Option<String>,
         /// Optional session name when it is not part of `resource`.
         name: Option<String>,
         /// Owning agent; inferred from the current directory when omitted.
@@ -68,7 +74,7 @@ enum Command {
         #[command(flatten)]
         selection: SessionSelection,
     },
-    /// Stop an agent, or every agent, keeping their disks, so attaching to a session after a start resumes it.
+    /// Stop an agent, or every agent; disks are kept, and sessions resume after a start.
     ///
     /// Running harnesses are stopped with the VM. Applying the manifest again keeps the agent stopped.
     /// Without an agent, asks whether to stop every running agent; `--all --now` does so at once.
@@ -76,12 +82,12 @@ enum Command {
         #[command(flatten)]
         target: StopTarget,
     },
-    /// Start a stopped agent's Sandbox VM on its kept disk and wait until the agent is Ready.
+    /// Start a stopped agent on its kept disk and wait until it is ready.
     Start {
         #[command(flatten)]
         target: RunStateTarget,
     },
-    /// Show the tools an agent's image installs, from its folder's tools.yaml, and change them.
+    /// Show or change the tools an agent's image installs.
     ///
     /// The current directory's agent, or the one `--agent` names. After a change, it offers to
     /// recreate the agent with the new tools.
@@ -92,27 +98,27 @@ enum Command {
         #[command(subcommand)]
         command: Option<ToolsCommand>,
     },
-    /// Manage the GitHub tokens agents act as.
+    /// Let agents work on GitHub, and manage the accounts they use.
     Github {
         #[command(subcommand)]
         command: GithubCommand,
     },
-    /// Manage Claude Code harness authentication.
+    /// Sign agents in to Claude Code.
     Claude {
         #[command(subcommand)]
         command: ClaudeCommand,
     },
-    /// Manage Codex CLI harness authentication.
+    /// Sign agents in to Codex.
     Codex {
         #[command(subcommand)]
         command: CodexCommand,
     },
-    /// Manage the instructions every agent on this host receives, ahead of its own.
+    /// Edit the instructions every agent on this machine gets, ahead of its own.
     Instructions {
         #[command(subcommand)]
         command: InstructionsCommand,
     },
-    /// Execute a command in an agent sandbox.
+    /// Run a command in an agent.
     Exec {
         /// Pass stdin to an allocated terminal.
         #[arg(short = 'i', long, requires = "tty")]
@@ -132,7 +138,7 @@ enum Command {
         #[arg(last = true, required = true, num_args = 1..)]
         command: Vec<String>,
     },
-    /// Open an OpenSSH session to an agent through `agentctl ssh-proxy`.
+    /// Open an SSH session to an agent.
     Ssh {
         /// Agent name, as an alternative to the positional resource.
         #[arg(long, conflicts_with_all = ["resource", "variant"])]
@@ -334,7 +340,7 @@ enum Command {
         #[arg(short = 'o', long, default_value = "table", value_enum)]
         output: OutputFormat,
     },
-    /// Manage the Agent CLI installation.
+    /// Update agentctl and agentd.
     Self_ {
         #[command(subcommand)]
         command: self_update::SelfCommand,
@@ -342,11 +348,13 @@ enum Command {
     /// Relay one connection to an agent's SSH server over standard input and output.
     ///
     /// The generated OpenSSH client configuration runs this as its `ProxyCommand`.
+    #[command(hide = true)]
     SshProxy {
         /// Agent resource or name.
         resource: String,
     },
     /// Relay one connection to an agent's desktop over standard input and output.
+    #[command(hide = true)]
     VncProxy {
         /// Agent resource or name.
         resource: String,
@@ -604,9 +612,19 @@ fn parse_github_owner(value: &str) -> Result<String, String> {
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
-        // The daemon rejected the desired state; the message is the whole story.
-        Err(CommandError::Agent(Error::Rpc(error))) if error.is_invalid_params() => {
+        // agentd's message is the whole story, apart from how to change what cannot be changed.
+        Err(CommandError::Agent(Error::Rpc(error))) => {
             eprintln!("agentctl: {}", error.message);
+            if error.message.starts_with("immutable Agent field changed") {
+                eprintln!(
+                    "That changes only by creating the agent again, which starts its disk over: `agentctl delete agent/NAME`, then apply."
+                );
+            }
+            ExitCode::FAILURE
+        }
+        // Most of agentctl's own refusals are `Invalid`, and few are about an Agent.
+        Err(CommandError::Agent(Error::Invalid(message))) => {
+            eprintln!("agentctl: {message}");
             ExitCode::FAILURE
         }
         Err(error) => {
@@ -653,10 +671,17 @@ async fn without_command(home: &ControlPlaneHome, client: &Client) -> CommandRes
     let directory = std::env::current_dir().map_err(Error::from)?;
     match client.resolve_agent_variant(directory, None).await {
         Ok(agent) => {
-            let question = format!(
-                "This directory has the agent {}. What would you like to do?",
-                agent.metadata.name
-            );
+            let name = agent.metadata.name;
+            if agent.spec.is_stopped() {
+                let question = format!("This directory has the agent {name}, which is stopped. Start it?");
+                if prompt::confirm(&question)? {
+                    client.set_run_state(&name, RunState::Running).await?;
+                    wait_until_converged_simply(client, &name, Duration::from_mins(10)).await?;
+                    attach(home, client, None, None, Some(name), None, SessionSelection::default()).await?;
+                    return Ok(ExitCode::SUCCESS);
+                }
+            }
+            let question = format!("This directory has the agent {name}. What would you like to do?");
             if let Some(code) = agents_here_menu(home, client, &[&question]).await? {
                 return Ok(code);
             }
@@ -910,7 +935,7 @@ async fn execute(command: Command, home: &ControlPlaneHome, client: &Client) -> 
             agent,
             variant,
             selection,
-        } => attach(home, client, &resource, name, agent, variant, selection).await?,
+        } => attach(home, client, resource.as_deref(), name, agent, variant, selection).await?,
         Command::Exec {
             stdin,
             tty,
@@ -1058,20 +1083,35 @@ fn print_json<T: serde::Serialize>(value: &T) -> CommandResult<()> {
 async fn attach(
     home: &ControlPlaneHome,
     client: &Client,
-    resource: &str,
+    resource: Option<&str>,
     name: Option<String>,
     agent: Option<String>,
     variant: Option<AgentVariantName>,
     selection: SessionSelection,
 ) -> CommandResult<()> {
-    let (resource, name) = resource_reference(resource, name)?;
-    if resource != Resource::Session {
-        return Err(Error::Invalid("attach requires a session resource".into()).into());
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(CommandError::Message(
+            "attach needs a terminal; `agentctl prompt` sends a session a prompt without one".into(),
+        ));
     }
-    let session = SessionName::new(require_name(name, "Session")?)?;
+    let named = match resource {
+        Some(resource) => {
+            let (resource, name) = resource_reference(resource, name)?;
+            if resource != Resource::Session {
+                return Err(Error::Invalid("attach requires a session resource".into()).into());
+            }
+            Some(SessionName::new(require_name(name, "Session")?)?)
+        }
+        None => None,
+    };
     let inferred = agent.is_none() && variant.is_none();
     let agent = agent.or(offer_init_if_missing(home, client, inferred).await?);
     let agent = resolve_agent_name(client, agent, variant).await?;
+    offer_start_if_stopped(client, &agent).await?;
+    let session = match named {
+        Some(session) => session,
+        None => SessionName::new(choose_session(client, &agent).await?)?,
+    };
     let wait = progress::Wait::start();
     let target = wait
         .until(
@@ -1101,6 +1141,7 @@ async fn exec_command(
     let inferred = resource.is_none() && agent.is_none() && variant.is_none();
     let agent = agent.or(offer_init_if_missing(home, client, inferred).await?);
     let agent = resolve_execution_agent(client, resource, agent, variant).await?;
+    offer_start_if_stopped(client, &agent).await?;
     if tty && (!std::io::stdin().is_terminal() || !std::io::stdout().is_terminal()) {
         return Err(Error::Invalid("-it requires an interactive local terminal".into()).into());
     }
@@ -1478,6 +1519,18 @@ async fn session_target(client: &Client, target: SessionTarget) -> CommandResult
     Ok((agent, session))
 }
 
+/// Fails with what is missing when `agent` has no session `name`, as agentd's own answer names
+/// neither.
+async fn require_session(client: &Client, agent: &str, name: &SessionName) -> CommandResult<()> {
+    let sessions = client.list_sessions(Some(agent)).await?;
+    if sessions.iter().any(|session| &session.name == name) {
+        return Ok(());
+    }
+    Err(CommandError::Message(format!(
+        "{agent} has no session {name}; `agentctl get sessions --agent {agent}` lists them"
+    )))
+}
+
 async fn create_session(
     home: &ControlPlaneHome,
     client: &Client,
@@ -1540,6 +1593,7 @@ async fn prompt_session(
 
 async fn set_archived(client: &Client, target: SessionTarget, archived: bool) -> CommandResult<()> {
     let (agent, name) = session_target(client, target).await?;
+    require_session(client, &agent, &name).await?;
     let session = client.set_session_archived(&agent, name.clone(), archived).await?;
     if !archived {
         println!("session/{agent}/{name} unarchived");
@@ -1553,6 +1607,7 @@ async fn set_archived(client: &Client, target: SessionTarget, archived: bool) ->
 
 async fn turns(client: &Client, target: SessionTarget, last: Option<usize>) -> CommandResult<()> {
     let (agent, session) = session_target(client, target).await?;
+    require_session(client, &agent, &session).await?;
     print_turns(&client.session_turns(&agent, session, last).await?);
     Ok(())
 }
@@ -1741,9 +1796,9 @@ async fn resolve_agent_name(
 
 fn inference_error(error: Error) -> CommandError {
     match error {
-        Error::Rpc(error) if error.is_not_found() => CommandError::Message(
-            "no agent was applied from the current directory; specify --agent or --variant".into(),
-        ),
+        Error::Rpc(error) if error.is_not_found() => {
+            CommandError::Message("no agent here; `agentctl init` sets one up, or pass --agent NAME".into())
+        }
         Error::Rpc(error) => CommandError::Message(error.message),
         error => error.into(),
     }
@@ -1753,7 +1808,21 @@ fn inference_error(error: Error) -> CommandError {
 /// run state, Ready or stopped, and returns it then; or until a terminal
 /// error, the timeout, or Ctrl-C.
 async fn wait_until_converged(client: &Client, name: &str, timeout: Duration) -> CommandResult<Agent> {
-    let waited = progress::Wait::start()
+    follow_until_converged(progress::Wait::start(), client, name, timeout).await
+}
+
+/// [`wait_until_converged`] for people new to agents, with [`progress::Wait::simple`].
+async fn wait_until_converged_simply(client: &Client, name: &str, timeout: Duration) -> CommandResult<Agent> {
+    follow_until_converged(progress::Wait::simple(), client, name, timeout).await
+}
+
+async fn follow_until_converged(
+    wait: progress::Wait,
+    client: &Client,
+    name: &str,
+    timeout: Duration,
+) -> CommandResult<Agent> {
+    let waited = wait
         .until(client, name, tokio::time::timeout(timeout, client.converge(name)))
         .await;
     let Ok(converged) = waited else {
@@ -2114,14 +2183,15 @@ async fn status(home: &ControlPlaneHome, client: &Client) -> CommandResult<()> {
         ),
     )];
     let mut next: Vec<NextStep> = Vec::new();
-    for (label, signed_in, command) in [
-        ("Claude Code", auth.claude_code, "claude"),
-        ("Codex", auth.codex, "codex"),
-    ] {
+    for (label, signed_in) in [("Claude Code", auth.claude_code), ("Codex", auth.codex)] {
         rows.push((label, if signed_in { "signed in" } else { "not signed in" }.to_owned()));
-        if !signed_in {
-            next.push((format!("agentctl {command} login"), format!("Sign in to {label}")));
-        }
+    }
+    // Agents need one harness; the other is a choice, not a step.
+    if !auth.any_harness() {
+        next.push((
+            "agentctl claude login".to_owned(),
+            "Sign in to Claude Code, or to Codex with `agentctl codex login`".to_owned(),
+        ));
     }
     for (index, line) in github_lines(&auth.github, &mut next).into_iter().enumerate() {
         rows.push((if index == 0 { "GitHub" } else { "" }, line));
@@ -2138,16 +2208,17 @@ async fn status(home: &ControlPlaneHome, client: &Client) -> CommandResult<()> {
                     init::home_relative(&instructions)
                 )
             }
-            _ => {
-                next.push((
-                    "agentctl instructions edit".to_owned(),
-                    "Write instructions every agent gets".to_owned(),
-                ));
-                "none".to_owned()
-            }
+            _ => "none".to_owned(),
         },
     ));
-    rows.push(("This directory", directory_line(home, client, &mut next).await?));
+    let mut here = Vec::new();
+    rows.push(("This directory", directory_line(home, client, &mut here).await?));
+    // `init` signs in as it goes, so without an agent here it is the one step; otherwise what
+    // concerns this directory's agent comes first.
+    if !here.iter().any(|(command, _)| command == "agentctl init") {
+        here.append(&mut next);
+    }
+    next = here;
     for (label, value) in rows {
         println!("{label:<15} {value}");
     }
@@ -2203,7 +2274,10 @@ async fn directory_line(home: &ControlPlaneHome, client: &Client, next: &mut Vec
     let agent = match client.resolve_agent_variant(directory, None).await {
         Ok(agent) => agent,
         Err(Error::Rpc(error)) if error.is_not_found() => {
-            next.push(("agentctl init".to_owned(), "Set up an agent here".to_owned()));
+            next.push((
+                "agentctl init".to_owned(),
+                "Set up an agent here; it signs you in as needed".to_owned(),
+            ));
             return Ok("no agent".to_owned());
         }
         Err(Error::Rpc(error)) if error.is_invalid_params() => {
@@ -2224,6 +2298,9 @@ async fn directory_line(home: &ControlPlaneHome, client: &Client, next: &mut Vec
         Some(condition) => lowercase_words(&condition.reason),
         None => "starting".to_owned(),
     };
+    if agent.spec.is_stopped() {
+        next.push((format!("agentctl start agent/{name}"), format!("Start {name} again")));
+    }
     let sessions = client.list_sessions(Some(&name)).await?.len();
     let outdated = agent
         .status
@@ -2296,6 +2373,22 @@ async fn harness_login(
 
 /// Attaches to a new Session with the first free name, `s1`, `s2` and so on.
 async fn attach_new_session(home: &ControlPlaneHome, client: &Client, agent: &str) -> CommandResult<()> {
+    let name = new_session_name(client, agent).await?;
+    eprintln!("Attaching to session/{name}; detach with Ctrl-b d, and run `agentctl attach` here to return.");
+    attach(
+        home,
+        client,
+        Some("session"),
+        Some(name),
+        Some(agent.to_owned()),
+        None,
+        SessionSelection::default(),
+    )
+    .await
+}
+
+/// The first free session name of `agent`: `s1`, `s2` and so on.
+async fn new_session_name(client: &Client, agent: &str) -> CommandResult<String> {
     let taken: Vec<String> = client
         .list_sessions(Some(agent))
         .await?
@@ -2303,21 +2396,57 @@ async fn attach_new_session(home: &ControlPlaneHome, client: &Client, agent: &st
         .map(|session| session.name.to_string())
         .collect();
     // One of the first `taken.len() + 1` names is always free.
-    let name = (1..=taken.len() + 1)
+    Ok((1..=taken.len() + 1)
         .map(|number| format!("s{number}"))
         .find(|name| !taken.contains(name))
-        .unwrap_or_else(|| "s1".into());
-    eprintln!("Attaching to session/{name}; detach with Ctrl-b d, and run `agentctl attach session/{name}` to return.");
-    attach(
-        home,
-        client,
-        "session",
-        Some(name),
-        Some(agent.to_owned()),
-        None,
-        SessionSelection::default(),
-    )
-    .await
+        .unwrap_or_else(|| "s1".into()))
+}
+
+/// The session `agentctl attach` opens without a name: the agent's only one, a new one when it
+/// has none, or the one chosen at a terminal.
+async fn choose_session(client: &Client, agent: &str) -> CommandResult<String> {
+    let sessions: Vec<String> = client
+        .list_sessions(Some(agent))
+        .await?
+        .into_iter()
+        .filter(|session| !session.is_archived())
+        .map(|session| session.name.to_string())
+        .collect();
+    match sessions.as_slice() {
+        [] => {
+            let name = new_session_name(client, agent).await?;
+            eprintln!("Starting session/{name}; detach with Ctrl-b d, and run `agentctl attach` here to return.");
+            Ok(name)
+        }
+        [only] => Ok(only.clone()),
+        _ if !prompt::interactive() => Err(CommandError::Message(format!(
+            "{agent} has several sessions; name one: agentctl attach session/NAME ({})",
+            sessions.join(", ")
+        ))),
+        _ => {
+            let mut options = sessions.clone();
+            options.push("A new session".to_owned());
+            let chosen = prompt::choose(&format!("Which session of {agent}?"), &options, Some(0))?.unwrap_or(0);
+            match sessions.get(chosen) {
+                Some(name) => Ok(name.clone()),
+                None => new_session_name(client, agent).await,
+            }
+        }
+    }
+}
+
+/// Offers to start `agent` when it is stopped, at a terminal; elsewhere, or when declined, says
+/// how to start it.
+async fn offer_start_if_stopped(client: &Client, agent: &str) -> CommandResult<()> {
+    if !client.get(agent).await?.spec.is_stopped() {
+        return Ok(());
+    }
+    if prompt::interactive() && prompt::confirm(&format!("The agent {agent} is stopped. Start it?"))? {
+        client.set_run_state(agent, RunState::Running).await?;
+        wait_until_converged_simply(client, agent, Duration::from_mins(10)).await?;
+        return Ok(());
+    }
+    Err(Error::Stopped(agent.to_owned()).into())
 }
 
 fn read_token_from_stdin() -> Result<zeroize::Zeroizing<String>, Error> {
@@ -2881,7 +3010,7 @@ mod tests {
         }));
         assert_eq!(
             missing.to_string(),
-            "no agent was applied from the current directory; specify --agent or --variant"
+            "no agent here; `agentctl init` sets one up, or pass --agent NAME"
         );
     }
 

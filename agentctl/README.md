@@ -68,7 +68,9 @@ agent's disk takes host space as the agent writes, up to its size. `agentctl too
 created. Edit the files like any others. `agentctl` on its own asks
 whether to open the current directory's Agent in `agentctl tui`, or to set one up when there is none, and prints the
 help when you decline. `attach`, `exec` and `ssh` likewise offer `init` when they would use the current directory's
-Agent and find none. Both ask only when a person is at the terminal; scripts get the usual error.
+Agent and find none, and `agentctl`, `attach` and `exec` offer to start it when it is stopped. `agentctl attach` on its
+own opens the agent's only session, starts one when it has none, and asks which when it has several. All of these ask
+only when a person is at the terminal; scripts get the usual error.
 
 ### Stopping every agent
 
