@@ -430,7 +430,7 @@ fn choose_checkout(root: &Path) -> Result<(Checkout, bool), Error> {
 }
 
 /// `path` with the home directory written as `~`, as people read paths.
-fn home_relative(path: &Path) -> String {
+pub(crate) fn home_relative(path: &Path) -> String {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .and_then(|home| path.strip_prefix(&home).ok().map(|rest| Path::new("~").join(rest)))

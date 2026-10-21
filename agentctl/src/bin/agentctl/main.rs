@@ -1989,47 +1989,36 @@ async fn harness_status(client: &Client, harness: agent::Harness) -> CommandResu
     }
 }
 
-/// Shows agentd, the stored logins and the current directory's agent at a glance.
+/// A command that would change what `agentctl status` shows, and what it does.
+type NextStep = (String, String);
+
+/// Shows agentd, the stored logins and the current directory's agent at a glance, followed by
+/// the commands that would change what it shows.
 async fn status(home: &ControlPlaneHome, client: &Client) -> CommandResult<()> {
     let daemon = client.health().await?;
     let auth = client.auth_status().await?;
     let mut rows = vec![(
         "agentd",
         format!(
-            "{}, running",
-            daemon.build_version.as_deref().unwrap_or("unknown version")
+            "running, version {}",
+            daemon
+                .build_version
+                .as_deref()
+                .unwrap_or("unknown")
+                .trim_start_matches('v')
         ),
     )];
+    let mut next: Vec<NextStep> = Vec::new();
     for (label, signed_in, command) in [
         ("Claude Code", auth.claude_code, "claude"),
         ("Codex", auth.codex, "codex"),
     ] {
-        rows.push((
-            label,
-            if signed_in {
-                "signed in".to_owned()
-            } else {
-                format!("not signed in: agentctl {command} login")
-            },
-        ));
+        rows.push((label, if signed_in { "signed in" } else { "not signed in" }.to_owned()));
+        if !signed_in {
+            next.push((format!("agentctl {command} login"), format!("Sign in to {label}")));
+        }
     }
-    let now = time::OffsetDateTime::now_utc();
-    let github = if auth.github.is_empty() {
-        vec!["no tokens: agentctl github login".to_owned()]
-    } else {
-        auth.github
-            .iter()
-            .map(|token| {
-                let expiry = match token.expires_at {
-                    Some(expires_at) if token.expired(now) => format!("expired {}", expires_at.date()),
-                    Some(expires_at) => format!("expires {}", expires_at.date()),
-                    None => format!("expires {}", token.kind.unstated_expiry()),
-                };
-                format!("acts as {} in {}, {expiry}", token.account.login, token.scope())
-            })
-            .collect()
-    };
-    for (index, line) in github.into_iter().enumerate() {
+    for (index, line) in github_lines(&auth.github, &mut next).into_iter().enumerate() {
         rows.push((if index == 0 { "GitHub" } else { "" }, line));
     }
     let instructions = home.instructions_path();
@@ -2037,51 +2026,131 @@ async fn status(home: &ControlPlaneHome, client: &Client) -> CommandResult<()> {
         "Instructions",
         match std::fs::read_to_string(&instructions) {
             Ok(text) if !text.trim().is_empty() => {
-                format!("{} lines in {}", text.lines().count(), instructions.display())
+                let lines = text.lines().count();
+                format!(
+                    "{lines} line{} in {}",
+                    if lines == 1 { "" } else { "s" },
+                    init::home_relative(&instructions)
+                )
             }
-            _ => "none for every agent: agentctl instructions edit".to_owned(),
+            _ => {
+                next.push((
+                    "agentctl instructions edit".to_owned(),
+                    "Write instructions every agent gets".to_owned(),
+                ));
+                "none".to_owned()
+            }
         },
     ));
-    let directory = std::env::current_dir().map_err(Error::from)?;
-    let here = match client.resolve_agent_variant(directory, None).await {
-        Ok(agent) => {
-            let ready = match agent.status.ready_condition() {
-                Some(condition) if condition.status == agent::ConditionStatus::True => "Ready",
-                Some(condition) => condition.reason.as_str(),
-                None => "Pending",
-            };
-            let sessions = client.list_sessions(Some(&agent.metadata.name)).await?.len();
-            let outdated = agent
-                .status
-                .provenance
-                .as_ref()
-                .and_then(|provenance| provenance.manifest_path.as_deref())
-                .and_then(Path::parent)
-                .and_then(|folder| tools::outdated(home, &agent.metadata.name, folder))
-                == Some(true);
-            match format::blocking_problem(&agent) {
-                Some(problem) => format!("{} cannot start: {problem}", agent.metadata.name),
-                None => format!(
-                    "{}, {ready}, {sessions} session{}{}",
-                    agent.metadata.name,
-                    if sessions == 1 { "" } else { "s" },
-                    if outdated {
-                        "; its tools changed since it was created: agentctl tools"
-                    } else {
-                        ""
-                    }
-                ),
-            }
-        }
-        Err(Error::Rpc(error)) if error.is_not_found() => "no agent: agentctl init".to_owned(),
-        Err(Error::Rpc(error)) if error.is_invalid_params() => "several agents: agentctl tui".to_owned(),
-        Err(error) => return Err(inference_error(error)),
-    };
-    rows.push(("This directory", here));
+    rows.push(("This directory", directory_line(home, client, &mut next).await?));
     for (label, value) in rows {
         println!("{label:<15} {value}");
     }
+    next.dedup_by(|later, earlier| later.0 == earlier.0);
+    if !next.is_empty() {
+        let width = next.iter().map(|(command, _)| command.len()).max().unwrap_or(0);
+        println!("\nNext steps");
+        for (command, what) in next {
+            println!("  {command:<width$}  {what}");
+        }
+    }
     Ok(())
+}
+
+/// Each stored GitHub token as the account, where agents use it and until when.
+fn github_lines(tokens: &[agent::github::GithubToken], next: &mut Vec<NextStep>) -> Vec<String> {
+    if tokens.is_empty() {
+        next.push((
+            "agentctl github login".to_owned(),
+            "Let agents work on GitHub".to_owned(),
+        ));
+        return vec!["no account".to_owned()];
+    }
+    let now = time::OffsetDateTime::now_utc();
+    tokens
+        .iter()
+        .map(|token| {
+            let place = match &token.owner {
+                Some(owner) => format!("in {owner}"),
+                None if tokens.len() == 1 => "in every organization".to_owned(),
+                None => "in every other organization".to_owned(),
+            };
+            let expiry = match token.expires_at {
+                Some(expires_at) if token.expired(now) => {
+                    next.push((
+                        "agentctl github login".to_owned(),
+                        format!("Replace the expired token for {}", token.account.login),
+                    ));
+                    format!("expired {}", expires_at.date())
+                }
+                Some(expires_at) => format!("until {}", expires_at.date()),
+                None if token.kind.single_owner() => "expiry unknown".to_owned(),
+                None => "no expiry".to_owned(),
+            };
+            format!("{} {place}, {expiry}", token.account.login)
+        })
+        .collect()
+}
+
+/// The current directory's agent: its state, sessions and whether its tools changed.
+async fn directory_line(home: &ControlPlaneHome, client: &Client, next: &mut Vec<NextStep>) -> CommandResult<String> {
+    let directory = std::env::current_dir().map_err(Error::from)?;
+    let agent = match client.resolve_agent_variant(directory, None).await {
+        Ok(agent) => agent,
+        Err(Error::Rpc(error)) if error.is_not_found() => {
+            next.push(("agentctl init".to_owned(), "Set up an agent here".to_owned()));
+            return Ok("no agent".to_owned());
+        }
+        Err(Error::Rpc(error)) if error.is_invalid_params() => {
+            next.push((
+                "agentctl tui".to_owned(),
+                "Choose one of this directory's agents".to_owned(),
+            ));
+            return Ok("several agents".to_owned());
+        }
+        Err(error) => return Err(inference_error(error)),
+    };
+    let name = agent.metadata.name.clone();
+    if let Some(problem) = format::blocking_problem(&agent) {
+        return Ok(format!("{name} cannot start: {problem}"));
+    }
+    let state = match agent.status.ready_condition() {
+        Some(condition) if condition.status == agent::ConditionStatus::True => "running".to_owned(),
+        Some(condition) => lowercase_words(&condition.reason),
+        None => "starting".to_owned(),
+    };
+    let sessions = client.list_sessions(Some(&name)).await?.len();
+    let outdated = agent
+        .status
+        .provenance
+        .as_ref()
+        .and_then(|provenance| provenance.manifest_path.as_deref())
+        .and_then(Path::parent)
+        .and_then(|folder| tools::outdated(home, &name, folder))
+        == Some(true);
+    if outdated {
+        next.push((
+            "agentctl tools".to_owned(),
+            format!("Recreate {name} with its changed tools"),
+        ));
+    }
+    Ok(format!(
+        "{name}: {state}, {sessions} session{}{}",
+        if sessions == 1 { "" } else { "s" },
+        if outdated { ", tools changed" } else { "" }
+    ))
+}
+
+/// A condition reason such as `ImageBuildFailed` as words: `image build failed`.
+fn lowercase_words(reason: &str) -> String {
+    let mut words = String::new();
+    for (index, character) in reason.chars().enumerate() {
+        if character.is_uppercase() && index > 0 {
+            words.push(' ');
+        }
+        words.extend(character.to_lowercase());
+    }
+    words
 }
 
 /// Opens the host-wide instructions in an editor, creating the file first when it is missing.
@@ -2624,6 +2693,53 @@ mod tests {
         assert_eq!(parse_duration("2h").expect("hours"), Duration::from_hours(2));
         assert!(parse_duration("0s").is_err());
         assert!(parse_duration("forever").is_err());
+    }
+
+    #[test]
+    fn status_shows_github_tokens_as_account_place_and_expiry() {
+        let token = |owner: Option<&str>, login: &str, kind: &str, expires_at| agent::github::GithubToken {
+            owner: owner.map(str::to_owned),
+            account: agent::github::GithubAccount {
+                login: login.into(),
+                name: login.into(),
+                email: format!("{login}@example.com"),
+            },
+            kind: agent::github::TokenKind::of(kind),
+            expires_at,
+        };
+        let mut next = Vec::new();
+        assert_eq!(
+            github_lines(&[token(None, "danielskovli-agent", "gho_x", None)], &mut next),
+            ["danielskovli-agent in every organization, no expiry"]
+        );
+        assert!(next.is_empty());
+        let lines = github_lines(
+            &[
+                token(
+                    Some("digdir"),
+                    "digdir-bot",
+                    "github_pat_x",
+                    Some(time::macros::datetime!(2020-01-02 0:00 UTC)),
+                ),
+                token(None, "danielskovli-agent", "ghp_x", None),
+            ],
+            &mut next,
+        );
+        assert_eq!(
+            lines,
+            [
+                "digdir-bot in digdir, expired 2020-01-02",
+                "danielskovli-agent in every other organization, no expiry"
+            ]
+        );
+        assert_eq!(next.len(), 1, "the expired token is to be replaced: {next:?}");
+        assert_eq!(github_lines(&[], &mut Vec::new()), ["no account"]);
+    }
+
+    #[test]
+    fn condition_reasons_read_as_lowercase_words() {
+        assert_eq!(lowercase_words("Stopped"), "stopped");
+        assert_eq!(lowercase_words("ImageBuildFailed"), "image build failed");
     }
 
     #[test]
