@@ -2274,10 +2274,15 @@ async fn directory_line(home: &ControlPlaneHome, client: &Client, next: &mut Vec
     let agent = match client.resolve_agent_variant(directory, None).await {
         Ok(agent) => agent,
         Err(Error::Rpc(error)) if error.is_not_found() => {
-            next.push((
-                "agentctl init".to_owned(),
-                "Set up an agent here; it signs you in as needed".to_owned(),
-            ));
+            let directory = std::env::current_dir().map_err(Error::from)?;
+            let what = if directory.join(manifest::MANIFEST_FILE).is_file() {
+                "Create the agent from agent.yaml"
+            } else if tui::working_tree_manifests(&directory).is_empty() {
+                "Set up an agent here; it signs you in as needed"
+            } else {
+                "Create one of the agents set up here, or a new one"
+            };
+            next.push(("agentctl init".to_owned(), what.to_owned()));
             return Ok("no agent".to_owned());
         }
         Err(Error::Rpc(error)) if error.is_invalid_params() => {

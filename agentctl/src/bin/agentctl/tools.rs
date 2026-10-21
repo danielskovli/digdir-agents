@@ -478,7 +478,16 @@ pub(crate) fn sync(directory: &Path) -> Result<bool, Error> {
         return Ok(false);
     };
     let path = directory.join(DOCKERFILE);
-    let current = std::fs::read_to_string(&path)?;
+    let current = match std::fs::read_to_string(&path) {
+        Ok(current) => current,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Error::Invalid(format!(
+                "{} has a {TOOLS_FILE} but no {DOCKERFILE}: agentctl writes the tools into the Dockerfile beside the manifest",
+                directory.display()
+            )));
+        }
+        Err(error) => return Err(error.into()),
+    };
     let Some(updated) = with_block(&current, &tools) else {
         return Err(Error::Invalid(format!(
             "{} has no block generated from tools.yaml; put `{BEGIN}` and `{END}` lines where it goes",
@@ -592,7 +601,18 @@ async fn target(client: &Client, agent: Option<&str>) -> CommandResult<(PathBuf,
     if directory.join(TOOLS_FILE).is_file() {
         return Ok((directory, None));
     }
+    if directory.join(agent::manifest::MANIFEST_FILE).is_file() {
+        return Err(kept_by_hand(&directory).into());
+    }
     Err(Error::Invalid("no agent here; `agentctl init` sets one up, or pass --agent NAME".into()).into())
+}
+
+/// The answer for an agent folder without `tools.yaml`, whose image is not agentctl's to write.
+fn kept_by_hand(folder: &Path) -> Error {
+    Error::Invalid(format!(
+        "{} has no {TOOLS_FILE}: its image is kept by hand in its Dockerfile, so there are no tools for agentctl to change",
+        crate::init::home_relative(folder)
+    ))
 }
 
 /// `agentctl tools`: shows the tools, adds or removes some, and offers to recreate the agent
@@ -609,8 +629,7 @@ pub(crate) async fn run(
     remove: &[String],
 ) -> CommandResult<()> {
     let (folder, agent) = target(client, agent).await?;
-    let mut tools =
-        read(&folder)?.ok_or_else(|| Error::Invalid(format!("{} has no {TOOLS_FILE}", folder.display())))?;
+    let mut tools = read(&folder)?.ok_or_else(|| kept_by_hand(&folder))?;
     let mut changes = Vec::new();
     for tool in add {
         changes.push(format!("Added {}.", tools.add(tool)?));
@@ -757,6 +776,15 @@ mod tests {
 
         std::fs::write(directory.path().join(DOCKERFILE), "FROM mine\n").expect("Dockerfile");
         sync(directory.path()).expect_err("no block to write into");
+    }
+
+    #[test]
+    fn a_folder_without_tools_is_left_alone_and_tools_without_a_dockerfile_say_where_it_goes() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        assert!(!sync(directory.path()).expect("nothing to sync"), "a hand-kept folder");
+        std::fs::write(directory.path().join(TOOLS_FILE), sample().render()).expect("tools.yaml");
+        let error = sync(directory.path()).expect_err("no Dockerfile beside the manifest");
+        assert!(error.to_string().contains("no Dockerfile"), "{error}");
     }
 
     #[test]
