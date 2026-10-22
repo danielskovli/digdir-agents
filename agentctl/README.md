@@ -37,8 +37,8 @@ Once the Agent is Ready it offers to open a Session. Before creating the agent i
 `$VISUAL` or `$EDITOR`, since the image
 (including the Dockerfile's contents) and mounts stay as the agent was created; changing them means deleting it and
 creating it again, which starts its disk over. Resources, access, accounts, environment and secrets change with
-`agentctl apply`. `agentctl status` shows agentd, the stored logins
-and the current directory's agent at a glance, with the commands that would change them, and `agentctl claude status` and `agentctl codex status` exit with 1
+`agentctl apply`. `agentctl status` shows agentd, the stored logins,
+the current directory's agent and a count of every agent on this machine at a glance, with the commands that would change them, and `agentctl claude status` and `agentctl codex status` exit with 1
 when that login is missing.
 
 `init` asks what the agent should be called, such as `dev` or `reviewer`, and writes `agents/<name>/` at the repository

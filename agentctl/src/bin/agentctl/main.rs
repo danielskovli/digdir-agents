@@ -2213,6 +2213,19 @@ async fn status(home: &ControlPlaneHome, client: &Client) -> CommandResult<()> {
     ));
     let mut here = Vec::new();
     rows.push(("This directory", directory_line(home, client, &mut here).await?));
+    let agents = client.list_agents().await?;
+    let sessions = client.list_sessions(None).await?;
+    let (line, waiting) = machine_line(&agents, &sessions);
+    rows.push(("All agents", line));
+    if waiting > 0 {
+        here.push((
+            "agentctl tui".to_owned(),
+            format!(
+                "Answer the session{} that need you",
+                if waiting == 1 { "" } else { "s" }
+            ),
+        ));
+    }
     // `init` signs in as it goes, so without an agent here it is the one step; otherwise what
     // concerns this directory's agent comes first.
     if !here.iter().any(|(command, _)| command == "agentctl init") {
@@ -2231,6 +2244,51 @@ async fn status(home: &ControlPlaneHome, client: &Client) -> CommandResult<()> {
         }
     }
     Ok(())
+}
+
+/// Every agent on this machine at a glance: how many run, and how many sessions wait for an
+/// answer, with that count.
+fn machine_line(agents: &[Agent], sessions: &[agent::sessions::Session]) -> (String, usize) {
+    let agents: Vec<&Agent> = agents
+        .iter()
+        .filter(|agent| agent.metadata.deletion_timestamp.is_none())
+        .collect();
+    if agents.is_empty() {
+        return ("none yet".to_owned(), 0);
+    }
+    let running = agents
+        .iter()
+        .filter(|agent| !agent.spec.is_stopped() && agent.status.is_ready())
+        .count();
+    let stopped = agents.iter().filter(|agent| agent.spec.is_stopped()).count();
+    let other = agents.len() - running - stopped;
+    let count_of =
+        |state: agent::sessions::State| sessions.iter().filter(|session| session.status.state == state).count();
+    let waiting = count_of(agent::sessions::State::WaitingForInput);
+    let working = count_of(agent::sessions::State::Working);
+    let mut parts = Vec::new();
+    for (count, word) in [
+        (running, "running"),
+        (other, "starting or failing"),
+        (stopped, "stopped"),
+    ] {
+        if count > 0 {
+            parts.push(format!("{count} {word}"));
+        }
+    }
+    let mut line = vec![format!("{} on this machine: {}", agents.len(), parts.join(", "))];
+    if waiting > 0 {
+        line.push(format!(
+            "{waiting} session{} need{} you",
+            if waiting == 1 { "" } else { "s" },
+            if waiting == 1 { "s" } else { "" }
+        ));
+    }
+    if working > 0 {
+        line.push(format!("{working} working"));
+    }
+    let line = line.join("; ");
+    (line, waiting)
 }
 
 /// Each stored GitHub token as the account, where agents use it and until when.

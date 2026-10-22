@@ -4282,6 +4282,28 @@ mod tests {
     }
 
     #[test]
+    fn status_sums_up_every_agent_on_the_machine() {
+        assert_eq!(crate::machine_line(&[], &[]), ("none yet".to_owned(), 0));
+        let agents = [
+            ready_agent("worker"),
+            ready_agent("reviewer"),
+            not_ready_agent("idle", RunState::Stopped, agent::Condition::REASON_STOPPED),
+        ];
+        let sessions = [
+            session("worker", "s1", "waitingForInput"),
+            session("worker", "s2", "working"),
+            session("reviewer", "r1", "idle"),
+        ];
+        assert_eq!(
+            crate::machine_line(&agents, &sessions),
+            (
+                "3 on this machine: 2 running, 1 stopped; 1 session needs you; 1 working".to_owned(),
+                1
+            )
+        );
+    }
+
+    #[test]
     fn a_stopped_agent_reads_stopped_and_one_changing_reads_stopping_or_starting() {
         let mut app = App::new();
         app.apply_snapshot(
