@@ -2216,7 +2216,7 @@ async fn status(home: &ControlPlaneHome, client: &Client) -> CommandResult<()> {
     let agents = client.list_agents().await?;
     let sessions = client.list_sessions(None).await?;
     let (line, waiting) = machine_line(&agents, &sessions);
-    rows.push(("All agents", line));
+    rows.push(("Globally", line));
     if waiting > 0 {
         here.push((
             "agentctl tui".to_owned(),
@@ -2246,7 +2246,7 @@ async fn status(home: &ControlPlaneHome, client: &Client) -> CommandResult<()> {
     Ok(())
 }
 
-/// Every agent on this machine at a glance: how many run, and how many sessions wait for an
+/// Every agent agentd runs at a glance: how many run, and how many sessions wait for an
 /// answer, with that count.
 fn machine_line(agents: &[Agent], sessions: &[agent::sessions::Session]) -> (String, usize) {
     let agents: Vec<&Agent> = agents
@@ -2254,7 +2254,7 @@ fn machine_line(agents: &[Agent], sessions: &[agent::sessions::Session]) -> (Str
         .filter(|agent| agent.metadata.deletion_timestamp.is_none())
         .collect();
     if agents.is_empty() {
-        return ("none yet".to_owned(), 0);
+        return ("no agents yet".to_owned(), 0);
     }
     let running = agents
         .iter()
@@ -2267,6 +2267,7 @@ fn machine_line(agents: &[Agent], sessions: &[agent::sessions::Session]) -> (Str
     let waiting = count_of(agent::sessions::State::WaitingForInput);
     let working = count_of(agent::sessions::State::Working);
     let mut parts = Vec::new();
+    let states = [running, other, stopped];
     for (count, word) in [
         (running, "running"),
         (other, "starting or failing"),
@@ -2276,7 +2277,14 @@ fn machine_line(agents: &[Agent], sessions: &[agent::sessions::Session]) -> (Str
             parts.push(format!("{count} {word}"));
         }
     }
-    let mut line = vec![format!("{} on this machine: {}", agents.len(), parts.join(", "))];
+    // One state for every agent reads as that state, "all" in front when there are several.
+    let summary = match (agents.len(), states.iter().filter(|count| **count > 0).count()) {
+        (1, _) => parts.join(", ").trim_start_matches("1 ").to_owned(),
+        (_, 1) => format!("all {}", parts.join(", ").split_once(' ').map_or("", |(_, word)| word)),
+        _ => parts.join(", "),
+    };
+    let count = agents.len();
+    let mut line = vec![format!("{count} agent{}: {summary}", if count == 1 { "" } else { "s" })];
     if waiting > 0 {
         line.push(format!(
             "{waiting} session{} need{} you",
