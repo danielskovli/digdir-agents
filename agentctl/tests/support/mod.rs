@@ -53,9 +53,9 @@ pub(crate) fn agent(name: &str) -> Agent {
                 retention_policy: Some(RetentionPolicy::Retain),
                 mounts: Vec::new(),
             },
-            home: HomeSpec {
+            home: Some(HomeSpec {
                 source: PathBuf::from("home"),
-            },
+            }),
             instructions: vec![InstructionsSpec {
                 source: PathBuf::from("instructions.md"),
             }],
@@ -71,6 +71,7 @@ pub(crate) fn agent(name: &str) -> Agent {
             environment: Vec::new(),
             secrets: Vec::new(),
             access: Vec::new(),
+            accounts: Vec::new(),
             network: NetworkSpec {
                 mode: NetworkMode::Mediated,
                 allow: NetworkAllow::All,

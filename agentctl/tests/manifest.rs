@@ -4,7 +4,9 @@ mod support;
 
 use std::path::PathBuf;
 
-use agent::{API_VERSION, EnvironmentSpec, Harness, KIND, SecretSpec, manifest};
+use agent::{
+    API_VERSION, EnvironmentSpec, Harness, KIND, NetworkAllow, NetworkMode, NetworkSpec, SecretSpec, manifest,
+};
 use sandbox::RootFilesystemMode;
 
 #[test]
@@ -28,6 +30,24 @@ fn decodes_the_minimal_manifest() {
         agent.spec.sandbox.resources.root_filesystem().mode(),
         RootFilesystemMode::Layered
     );
+}
+
+#[test]
+fn home_and_network_are_optional_and_default_to_no_home_and_mediated_egress() {
+    let agent = manifest::decode(include_bytes!("../examples/minimal/agent.yaml")).expect("minimal manifest");
+    assert_eq!(agent.spec.home, None);
+    assert_eq!(agent.spec.network, NetworkSpec::default());
+    assert_eq!(agent.spec.network.mode, NetworkMode::Mediated);
+    assert_eq!(agent.spec.network.allow, NetworkAllow::All);
+    assert!(agent.spec.network.deny.is_empty());
+
+    let encoded = serde_yaml_ng::to_string(&agent).expect("encode");
+    assert!(!encoded.contains("home:"), "{encoded}");
+    let decoded = manifest::decode(encoded.as_bytes()).expect("re-decode");
+    assert_eq!(decoded.spec, agent.spec);
+
+    let empty_home = manifest_with(&[("  home:\n    source: home\n", "  home:\n    source: \"\"\n")]);
+    manifest::decode(&empty_home).expect_err("an empty home source is still rejected");
 }
 
 #[test]
@@ -594,4 +614,75 @@ fn rejects_unknown_duplicate_and_configured_access_capabilities() {
         "        mode: layered\n    access:\n      - type: ssh\n",
     )]);
     assert!(matches!(manifest::decode(&nested), Err(agent::Error::Yaml(_))));
+}
+
+#[test]
+fn the_github_account_is_opt_in_and_owns_github_token() {
+    let agent = manifest::decode(&manifest_with_access("  accounts:\n    - type: github\n")).expect("github account");
+    assert!(agent.spec.github_account());
+    let encoded = serde_yaml_ng::to_string(&agent).expect("encode");
+    assert!(encoded.contains("accounts:\n  - type: github"), "{encoded}");
+    let without = manifest::decode(&manifest_with(&[])).expect("no accounts");
+    assert!(!without.spec.github_account());
+
+    assert!(matches!(
+        manifest::decode(&manifest_with_access("  accounts:\n    - type: github\n    - type: github\n")),
+        Err(agent::Error::Invalid(message)) if message.contains("spec.accounts[1]")
+    ));
+    assert!(
+        matches!(
+            manifest::decode(&manifest_with_access(
+                "  accounts:\n    - type: github\n      user: bot\n"
+            )),
+            Err(agent::Error::Yaml(_))
+        ),
+        "the GitHub account exposes no tunables"
+    );
+
+    let own_secret = "  secrets:\n    - environment: GITHUB_TOKEN\n      allowedHosts: [github.com]\n";
+    manifest::decode(&manifest_with_access(own_secret)).expect("a manifest may still bind its own GitHub token");
+    assert!(matches!(
+        manifest::decode(&manifest_with_access(&format!("  accounts:\n    - type: github\n{own_secret}"))),
+        Err(agent::Error::Invalid(message)) if message.contains("spec.secrets[0]")
+    ));
+    let own_placeholder = "  secrets:\n    - environment: GH_TOKEN\n      placeholder: github_pat_AGENT_MEDIATED_GITHUB_TOKEN\n      allowedHosts: [github.com]\n";
+    assert!(matches!(
+        manifest::decode(&manifest_with_access(&format!("  accounts:\n    - type: github\n{own_placeholder}"))),
+        Err(agent::Error::Invalid(message)) if message.contains("spec.secrets[0]")
+    ));
+    let overlapping = "  secrets:\n    - environment: GH_TOKEN\n      placeholder: github_pat_AGENT_MEDIATED\n      allowedHosts: [github.com]\n";
+    assert!(matches!(
+        manifest::decode(&manifest_with_access(&format!("  accounts:\n    - type: github\n{overlapping}"))),
+        Err(agent::Error::Invalid(message)) if message.contains("spec.secrets[0]")
+    ));
+    assert!(matches!(
+        manifest::decode(&manifest_with_access("  accounts:\n    - type: github\n  environment:\n    - name: GITHUB_TOKEN\n")),
+        Err(agent::Error::Invalid(message)) if message.contains("spec.environment[0]")
+    ));
+}
+
+#[test]
+fn the_github_account_may_name_its_owner_once() {
+    let owned = manifest::decode(&manifest_with_access(
+        "  accounts:\n    - type: github\n      owner: Digdir-Team\n",
+    ))
+    .expect("an owner");
+    assert_eq!(owned.spec.github_owner(), Some("Digdir-Team"));
+    let encoded = serde_yaml_ng::to_string(&owned).expect("encode");
+    assert!(encoded.contains("owner: Digdir-Team"), "{encoded}");
+
+    let unowned = manifest::decode(&manifest_with_access("  accounts:\n    - type: github\n")).expect("no owner");
+    assert_eq!(unowned.spec.github_owner(), None);
+    assert!(unowned.spec.github_account());
+
+    assert!(matches!(
+        manifest::decode(&manifest_with_access("  accounts:\n    - type: github\n      owner: not/an/owner\n")),
+        Err(agent::Error::Invalid(message)) if message.contains("not a GitHub user or organization")
+    ));
+    assert!(matches!(
+        manifest::decode(&manifest_with_access(
+            "  accounts:\n    - type: github\n      owner: digdir\n    - type: github\n      owner: altinn\n"
+        )),
+        Err(agent::Error::Invalid(message)) if message.contains("spec.accounts[1]")
+    ));
 }

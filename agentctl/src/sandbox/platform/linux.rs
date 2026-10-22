@@ -12,7 +12,8 @@ use super::{super::PlatformAdapter, files::write_if_changed};
 /// The platform-owned Sandbox user every Session, Execution and SSH login runs as.
 pub(crate) const USER: &str = "agent";
 pub(crate) const HOME: &str = "/home/agent";
-pub(crate) const WORKING_DIRECTORY: &str = "/home/agent/code";
+/// Where Sessions and Executions start, and where repository checkouts live.
+pub const WORKING_DIRECTORY: &str = "/home/agent/code";
 pub(crate) const CONTAINER_HOST: &str = "unix:///run/podman/podman.sock";
 /// Holds the Platform API base URL reachable from the Sandbox, read by harness hooks on every
 /// report. `agentd` binds a new host port on every start; Agent setup rewrites the file first
@@ -123,6 +124,7 @@ const PODMAN_SOCKET_DROP_IN_CONTENTS: &[u8] = b"[Socket]\nDirectoryMode=0755\nSo
 /// Agent setup for Linux Sandboxes.
 pub struct Linux {
     platform_api_url: String,
+    host_instructions: Option<std::path::PathBuf>,
 }
 
 impl Linux {
@@ -132,7 +134,15 @@ impl Linux {
     pub fn new(platform_api_url: impl Into<String>) -> Self {
         Self {
             platform_api_url: platform_api_url.into(),
+            host_instructions: None,
         }
+    }
+
+    /// Gives every agent the instructions in `path`, when it exists, ahead of its own.
+    #[must_use]
+    pub fn with_host_instructions(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.host_instructions = Some(path.into());
+        self
     }
 }
 
@@ -214,11 +224,13 @@ impl Linux {
         configure_podman(sandbox).await?;
         step.complete().await;
         let step = steps.start_step("Sync home").await;
-        let archive = archive_home(record.source_directory.clone(), record.agent.spec.home.source.clone()).await?;
-        sync_home(sandbox, archive).await?;
-        configure_git_identity(sandbox).await?;
+        if let Some(home) = &record.agent.spec.home {
+            let archive = archive_home(record.source_directory.clone(), home.source.clone()).await?;
+            sync_home(sandbox, archive).await?;
+        }
+        configure_git(sandbox, record.agent.spec.github_account()).await?;
         step.complete().await;
-        let instructions = read_instructions(record).await?;
+        let instructions = read_instructions(record, self.host_instructions.as_deref()).await?;
         let skills = read_skills(record).await?;
         for installation in &installations {
             let step = steps
@@ -234,22 +246,24 @@ impl Linux {
     }
 }
 
-async fn configure_git_identity(sandbox: &SandboxHandle) -> Result<(), Error> {
+/// Configures Git for the Agent's user when the image has it: the commit identity from
+/// `GIT_USER_NAME` and `GIT_USER_EMAIL`, and for an Agent with the GitHub account, HTTPS access to
+/// GitHub through the mediated `GITHUB_TOKEN`.
+async fn configure_git(sandbox: &SandboxHandle, github_account: bool) -> Result<(), Error> {
     let environment = &sandbox.snapshot().environment;
-    let (Some(name), Some(email)) = (environment.get("GIT_USER_NAME"), environment.get("GIT_USER_EMAIL")) else {
-        if environment.contains_key("GIT_USER_NAME") || environment.contains_key("GIT_USER_EMAIL") {
+    let identity = match (environment.get("GIT_USER_NAME"), environment.get("GIT_USER_EMAIL")) {
+        (Some(name), Some(email)) => Some((name.clone(), email.clone())),
+        (None, None) => None,
+        _ => {
             return Err(Error::Invalid(
                 "GIT_USER_NAME and GIT_USER_EMAIL must both be configured".into(),
             ));
         }
-        return Ok(());
     };
-    let present = sandbox
-        .run_execution(ExecutionSpec::command(
-            SandboxPath::new("/usr/bin/env"),
-            ["git".into(), "--version".into()],
-        ))
-        .await?;
+    if identity.is_none() && !github_account {
+        return Ok(());
+    }
+    let present = run_git(sandbox, &["--version"]).await?;
     match present.status.code {
         127 => return Ok(()),
         0 => {}
@@ -259,8 +273,73 @@ async fn configure_git_identity(sandbox: &SandboxHandle) -> Result<(), Error> {
             )));
         }
     }
-    run_git_config(sandbox, "user.name", name).await?;
-    run_git_config(sandbox, "user.email", email).await
+    if let Some((name, email)) = identity {
+        run_git_config(sandbox, "user.name", &name).await?;
+        run_git_config(sandbox, "user.email", &email).await?;
+    }
+    if github_account {
+        configure_github_https(sandbox).await?;
+    }
+    Ok(())
+}
+
+/// Gives Git the mediated `GITHUB_TOKEN` for GitHub over HTTPS, and sends GitHub's SSH URLs over
+/// HTTPS, since the Sandbox has no SSH key and mediation covers HTTPS only. An image that already
+/// configured either keeps its own.
+async fn configure_github_https(sandbox: &SandboxHandle) -> Result<(), Error> {
+    let helper = git_lookup(
+        sandbox,
+        &["config", "--get-urlmatch", "credential.helper", "https://github.com"],
+    )
+    .await?;
+    if helper.is_none() {
+        run_git_config(sandbox, GITHUB_CREDENTIAL_KEY, GITHUB_CREDENTIAL_HELPER).await?;
+    }
+    let rewrites = git_lookup(sandbox, &["config", "--get-regexp", r"^url\..*\.insteadof$"])
+        .await?
+        .unwrap_or_default();
+    for ssh in GITHUB_SSH_URLS {
+        if !rewrites.lines().any(|line| line.split_whitespace().nth(1) == Some(ssh)) {
+            let args = ["git", "config", "--global", "--add", GITHUB_HTTPS_REWRITE, ssh];
+            let output = run_git(sandbox, &args[1..]).await?;
+            checked_output("/usr/bin/env", &args, &output)?;
+        }
+    }
+    Ok(())
+}
+
+/// Hands Git the placeholder as the password; the mediator replaces it in the Basic credentials.
+const GITHUB_CREDENTIAL_KEY: &str = "credential.https://github.com.helper";
+const GITHUB_CREDENTIAL_HELPER: &str =
+    "!f() { test \"$1\" = get || exit 0; echo username=x-access-token; echo \"password=$GITHUB_TOKEN\"; }; f";
+const GITHUB_HTTPS_REWRITE: &str = "url.https://github.com/.insteadOf";
+const GITHUB_SSH_URLS: [&str; 2] = ["git@github.com:", "ssh://git@github.com/"];
+
+/// Runs `git config` that reads a value: its output when set, `None` when Git reports it unset.
+async fn git_lookup(sandbox: &SandboxHandle, args: &[&str]) -> Result<Option<String>, Error> {
+    let output = run_git(sandbox, args).await?;
+    match output.status.code {
+        0 => {
+            let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            Ok((!value.is_empty()).then_some(value))
+        }
+        1 => Ok(None),
+        _ => {
+            let mut full = vec!["git"];
+            full.extend_from_slice(args);
+            checked_output("/usr/bin/env", &full, &output).map(|()| None)
+        }
+    }
+}
+
+async fn run_git(sandbox: &SandboxHandle, args: &[&str]) -> Result<::sandbox::execution::ExecutionOutput, Error> {
+    let args = std::iter::once("git").chain(args.iter().copied()).map(str::to_owned);
+    Ok(sandbox
+        .run_execution(
+            ExecutionSpec::command(SandboxPath::new("/usr/bin/env"), args)
+                .with_environment([("HOME".into(), HOME.into())]),
+        )
+        .await?)
 }
 
 async fn run_git_config(sandbox: &SandboxHandle, key: &str, value: &str) -> Result<(), Error> {
@@ -388,8 +467,22 @@ pub(super) async fn wait_for_systemd(sandbox: &SandboxHandle) -> Result<(), Erro
 
 /// Concatenates the instruction files in manifest order, each terminated by a newline and
 /// separated by a blank line, so independent documents read as sections of one file.
-async fn read_instructions(record: &control_plane::AgentRecord) -> Result<Option<Vec<u8>>, Error> {
+/// The host-wide instructions in `host`, when that file exists, followed by the agent's own, or
+/// `None` when there are neither. An existing but empty host file still counts, so emptying it
+/// clears what agents were given.
+async fn read_instructions(record: &control_plane::AgentRecord, host: Option<&Path>) -> Result<Option<Vec<u8>>, Error> {
     let mut combined = Vec::new();
+    let mut any = false;
+    if let Some(host) = host {
+        match tokio::fs::read(host).await {
+            Ok(contents) => {
+                any = true;
+                append_instructions(&mut combined, &contents);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     for (index, spec) in record.agent.spec.instructions.iter().enumerate() {
         let source = if spec.source.is_absolute() {
             spec.source.clone()
@@ -402,14 +495,23 @@ async fn read_instructions(record: &control_plane::AgentRecord) -> Result<Option
                 "spec.instructions[{index}].source must identify a file"
             )));
         }
-        let contents = tokio::fs::read(source).await?;
-        if !combined.is_empty() {
-            combined.push(b'\n');
-        }
-        combined.extend_from_slice(contents.strip_suffix(b"\n").unwrap_or(&contents));
+        any = true;
+        append_instructions(&mut combined, &tokio::fs::read(source).await?);
+    }
+    Ok(any.then_some(combined))
+}
+
+/// Appends one instructions file, separated from what came before by a blank line.
+fn append_instructions(combined: &mut Vec<u8>, contents: &[u8]) {
+    let contents = contents.strip_suffix(b"\n").unwrap_or(contents);
+    if contents.is_empty() {
+        return;
+    }
+    if !combined.is_empty() {
         combined.push(b'\n');
     }
-    Ok((!combined.is_empty()).then_some(combined))
+    combined.extend_from_slice(contents);
+    combined.push(b'\n');
 }
 
 async fn read_skills(record: &control_plane::AgentRecord) -> Result<Vec<harness::Skill>, Error> {
@@ -556,7 +658,7 @@ pub(crate) async fn run_checked<S: AsRef<str>>(
 ///
 /// Returns an error when the Execution cannot start or `test` fails for any
 /// reason other than the path being absent.
-pub(super) async fn path_exists(sandbox: &SandboxHandle, test: &str, path: &str) -> Result<bool, Error> {
+pub(crate) async fn path_exists(sandbox: &SandboxHandle, test: &str, path: &str) -> Result<bool, Error> {
     let output = sandbox
         .run_execution(ExecutionSpec::command(
             SandboxPath::new("/usr/bin/test"),

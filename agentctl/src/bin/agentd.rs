@@ -117,8 +117,9 @@ async fn open_sandboxes(
     );
     let platform_api_url = microsandbox.platform_url();
     let provider: Rc<dyn agent::sandbox::Provider> = microsandbox;
-    let platform: Rc<dyn agent::sandbox::PlatformAdapter> =
-        Rc::new(agent::sandbox::platform::Linux::new(platform_api_url.clone()));
+    let platform: Rc<dyn agent::sandbox::PlatformAdapter> = Rc::new(
+        agent::sandbox::platform::Linux::new(platform_api_url.clone()).with_host_instructions(home.instructions_path()),
+    );
     Ok((
         Rc::new(agent::sandbox::Service::new([provider], [platform])?),
         platform_api_url,
@@ -170,8 +171,10 @@ async fn run_control_plane(home: ControlPlaneHome, database: persistence::Databa
         Rc::new(|error| tracing::error!(%error, "Session notification scan failed")),
     ));
     let (ssh, vnc) = access(&home, &database, store.clone())?;
+    let immediate_stops = agent::control_plane::ImmediateStops::default();
     let reconciler = Rc::new(
         Reconciler::new(store.clone(), sandboxes.clone(), provisioning.clone())
+            .with_immediate_stops(immediate_stops.clone())
             .with_session_notifier(session_notifier)
             .with_ssh_access(ssh.clone())
             .with_vnc_access(vnc.clone()),
@@ -182,8 +185,11 @@ async fn run_control_plane(home: ControlPlaneHome, database: persistence::Databa
         Duration::from_secs(30),
         reconciliation_errors("Agent"),
     );
-    let control_plane =
-        Rc::new(ControlPlane::new(store.clone(), Rc::new(wakeup.clone())).with_provisioning(provisioning));
+    let control_plane = Rc::new(
+        ControlPlane::new(store.clone(), Rc::new(wakeup.clone()))
+            .with_provisioning(provisioning)
+            .with_immediate_stops(immediate_stops),
+    );
     let convergence = agent::control_plane::Convergence::new(wakeup, store.clone(), changes.clone());
     let executions = Rc::new(ExecutionService::new(store.clone(), convergence.clone()));
     let sessions = Rc::new(SessionService::new(
